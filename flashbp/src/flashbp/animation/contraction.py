@@ -16,6 +16,7 @@ from matplotlib.colors import LogNorm
 
 from .layout import bipartite_layout, edges_from_H
 from .video import make_video
+from flashbp.analytics.style import ACTIVE_CHECK, ML_CORRECTION, TRUE_ERROR
 
 
 FAINT_EDGE = "#d0d0d0"
@@ -678,7 +679,7 @@ def _render_ml_factor_graph(
     var_lws = []
     for v in range(num_vars):
         if true_errors is not None and true_errors[v]:
-            var_edges.append("#1f77b4")
+            var_edges.append(TRUE_ERROR)
             var_lws.append(3.0)
         elif v in contracted:
             var_edges.append(CONTRACTED_EDGE)
@@ -700,10 +701,10 @@ def _render_ml_factor_graph(
     check_edges = []
     for d in range(num_checks):
         if ml_syndrome is not None and ml_syndrome[d]:
-            check_faces.append("#1f77b4")
-            check_edges.append("#1f77b4")
+            check_faces.append(ML_CORRECTION)
+            check_edges.append(ML_CORRECTION)
         elif syndrome[d]:
-            check_faces.append("black")
+            check_faces.append(ACTIVE_CHECK)
             check_edges.append("black")
         else:
             check_faces.append("white")

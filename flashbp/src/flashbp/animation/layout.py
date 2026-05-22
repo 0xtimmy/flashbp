@@ -94,6 +94,79 @@ def bb_torus_layout(l: int, m: int) -> dict:
     }
 
 
+def surface_code_layout(H_X: np.ndarray, H_Z: np.ndarray, d: int) -> dict:
+    """
+    Layout for the rotated planar surface code.
+
+    The CSS detector-error model has two disconnected Tanner subgraphs:
+    Z errors are checked by X stabilizers, and X errors are checked by
+    Z stabilizers.  We draw those as side-by-side copies of the d x d data
+    lattice, placing each stabilizer at the centroid of its qubit support.
+
+    Index convention (matches ``Code.to_dem``):
+        detectors [0, r_x)       : X-checks
+        detectors [r_x, r_x+r_z) : Z-checks
+        variables [0, n)         : Z errors on data qubits
+        variables [n, 2n)        : X errors on data qubits
+    """
+    r_x, n = H_X.shape
+    r_z, n_z = H_Z.shape
+    if n_z != n or n != d * d:
+        raise ValueError("surface_code_layout expects d*d columns in H_X/H_Z")
+
+    panel_w = float(max(d - 1, 1))
+    panel_h = float(max(d - 1, 1))
+    gap = max(1.0, 0.35 * d)
+    total_w = 2 * panel_w + gap
+    total_h = panel_h
+    margin = 0.05
+    usable = 1.0 - 2 * margin
+
+    z_off = 0.0
+    x_off = panel_w + gap
+
+    def qcoord(q: int) -> tuple[float, float]:
+        row, col = divmod(int(q), d)
+        return float(col), float((d - 1) - row)
+
+    def norm(x: float, y: float, panel_x: float) -> tuple[float, float]:
+        nx = margin + usable * (x + panel_x) / total_w
+        ny = margin + usable * y / total_h if total_h else 0.5
+        return (nx, ny)
+
+    def check_centroid(H: np.ndarray, row: int) -> tuple[float, float]:
+        supp = np.flatnonzero(H[row])
+        if len(supp) == 0:
+            return 0.0, 0.0
+        coords = np.asarray([qcoord(q) for q in supp], dtype=np.float64)
+        return float(coords[:, 0].mean()), float(coords[:, 1].mean())
+
+    var_pos: dict[int, tuple[float, float]] = {}
+    check_pos: dict[int, tuple[float, float]] = {}
+
+    for q in range(n):
+        x, y = qcoord(q)
+        var_pos[q] = norm(x, y, z_off)
+        var_pos[n + q] = norm(x, y, x_off)
+
+    for chk in range(r_x):
+        x, y = check_centroid(H_X, chk)
+        check_pos[chk] = norm(x, y, z_off)
+    for chk in range(r_z):
+        x, y = check_centroid(H_Z, chk)
+        check_pos[r_x + chk] = norm(x, y, x_off)
+
+    figsize = (total_w * 0.8 + 2.0, total_h * 0.8 + 2.0)
+    node_size = max(28.0, 520.0 / max(d, 1))
+
+    return {
+        "var_pos": var_pos,
+        "check_pos": check_pos,
+        "figsize": figsize,
+        "node_size": node_size,
+    }
+
+
 def edges_from_H(H: np.ndarray) -> list[tuple[int, int]]:
     """
     Enumerate (check, var) edges in the same row-major order the C++ decoder uses.

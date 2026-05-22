@@ -42,7 +42,7 @@ class SurfaceCode(Code):
 
     The Tanner-graph girth grows quickly with `d`: at small `d` the bulk
     is too small to host the canonical length-8 cycle around a face, so
-    the local FVS at modest ``degree`` stays small.
+    local GBP regions at modest ``degree`` stay small.
     """
 
     def __init__(self, d: int):

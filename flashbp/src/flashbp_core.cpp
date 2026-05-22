@@ -2,9 +2,10 @@
 #include "decoders/decoder.h"
 #include "decoders/simple_decoder.h"
 #include "decoders/tensor_decoder.h"
-#include "decoders/fvs_decoder.h"
+#include "decoders/gbp_decoder.h"
 #include "decoders/degree_decoder.h"
 #include "decoders/ml_decoder.h"
+#include "decoders/surprise_ml_decoder.h"
 #include <stdexcept>
 #include <string>
 
@@ -70,6 +71,17 @@ MLLogger make_logger<MLLogger>(py::object config) {
     return MLLogger{level, console, buffered, file};
 }
 
+template<>
+SurpriseMLLogger make_logger<SurpriseMLLogger>(py::object config) {
+    const unsigned int level    = py::cast<unsigned int>(config.attr("log_level"));
+    const bool         console  = py::cast<bool>(config.attr("log_console"));
+    const bool         buffered = py::cast<bool>(config.attr("log_buffered"));
+    const std::string  file     = config.attr("log_file").is_none()
+                                   ? std::string{}
+                                   : py::cast<std::string>(config.attr("log_file"));
+    return SurpriseMLLogger{level, console, buffered, file};
+}
+
 // ── Internal decoder factory ──────────────────────────────────────────────────
 
 template<typename LoggerT>
@@ -77,16 +89,28 @@ static std::unique_ptr<Decoder> make_decoder(const std::string&      type,
                                              const FlashBP<LoggerT>& bp,
                                              LoggerT                 logger,
                                              int                     tensor_degree,
-                                             int                     bond_dim)
+                                             int                     bond_dim,
+                                             const std::string&      region_policy)
 {
+    if constexpr (std::is_same_v<LoggerT, SurpriseMLLogger>) {
+        if (type == "surprise_ml" || type == "surprise_maximum_likelihood")
+            return std::make_unique<SurpriseMLDecoder>(
+                bp, std::move(logger), bond_dim);
+        throw std::invalid_argument(
+            "log_type='surprise_ml' only supports decoder='surprise_ml'.");
+    } else {
     if (type == "simple")
         return std::make_unique<SimpleDecoder<LoggerT>>(bp, std::move(logger));
     if (type == "tensor")
         return std::make_unique<TensorDecoder<LoggerT>>(bp, std::move(logger),
                                                        tensor_degree);
-    if (type == "fvs")
-        return std::make_unique<FvsDecoder<LoggerT>>(bp, std::move(logger),
-                                                    tensor_degree);
+    if (type == "gbp" || type == "generalized_belief_propagation")
+        return std::make_unique<GBPDecoder<LoggerT>>(
+            bp,
+            std::move(logger),
+            tensor_degree,
+            make_region_grouping_policy(region_policy, tensor_degree,
+                                        GBPDecoder<LoggerT>::MAX_AXES));
     if (type == "degree")
         return std::make_unique<DegreeDecoder<LoggerT>>(bp, std::move(logger),
                                                        tensor_degree);
@@ -95,8 +119,9 @@ static std::unique_ptr<Decoder> make_decoder(const std::string&      type,
             bp, std::move(logger), bond_dim);
 
     throw std::invalid_argument("Unknown decoder type: \"" + type + "\". "
-                                "Available: \"simple\", \"tensor\", \"fvs\", "
-                                "\"degree\", \"ml\".");
+                                "Available: \"simple\", \"tensor\", \"gbp\", "
+                                "\"degree\", \"ml\", \"surprise_ml\".");
+    }
 }
 
 // ── FlashBP<LoggerT> constructor ──────────────────────────────────────────────
@@ -145,7 +170,8 @@ FlashBP<LoggerT>::FlashBP(py::object dem, py::object config)
         py::cast<std::string>(config.attr("decoder")),
         *this, logger_,
         py::cast<int>(config.attr("degree")),
-        py::cast<int>(config.attr("bond_dim")));
+        py::cast<int>(config.attr("bond_dim")),
+        py::cast<std::string>(config.attr("region_policy")));
 }
 
 template<typename LoggerT>
@@ -262,6 +288,10 @@ py::object ml_shots_to_py(const std::vector<MLShotRecord>& shots) {
             st["states"]      = vec_to_numpy(step.states);
             st["log_probs"]   = vec_to_numpy(step.log_probs);
             st["class_log_probs"] = vec_to_numpy(step.class_log_probs);
+            st["surprise_scores"] = vec_to_numpy(step.surprise_scores);
+            st["kl_0_to_1"] = step.kl_0_to_1;
+            st["kl_1_to_0"] = step.kl_1_to_0;
+            st["js_divergence"] = step.js_divergence;
             steps.append(st);
         }
         py::dict shot;
@@ -298,6 +328,11 @@ py::object FlashBP<MLLogger>::get_recording() const {
     return ml_shots_to_py(logger_.ml_shots());
 }
 
+template<>
+py::object FlashBP<SurpriseMLLogger>::get_recording() const {
+    return ml_shots_to_py(logger_.ml_shots());
+}
+
 // ── Explicit instantiations ───────────────────────────────────────────────────
 
 template class FlashBP<Logger<false>>;
@@ -306,6 +341,7 @@ template class FlashBP<DecodeLogger<true>>;
 template class FlashBP<RecordLogger>;
 template class FlashBP<TensorLogger>;
 template class FlashBP<MLLogger>;
+template class FlashBP<SurpriseMLLogger>;
 
 // ── Public factory ────────────────────────────────────────────────────────────
 
@@ -325,6 +361,13 @@ std::unique_ptr<FlashBPBase> make_flashbp(py::object dem, py::object config) {
         if (decoder != "ml" && decoder != "maximum_likelihood")
             throw std::invalid_argument("log_type='ml' requires decoder='ml'.");
         return std::make_unique<FlashBP<MLLogger>>(dem, config);
+    }
+    if (log_type == "surprise_ml") {
+        const std::string decoder = py::cast<std::string>(config.attr("decoder"));
+        if (decoder != "surprise_ml" && decoder != "surprise_maximum_likelihood")
+            throw std::invalid_argument(
+                "log_type='surprise_ml' requires decoder='surprise_ml'.");
+        return std::make_unique<FlashBP<SurpriseMLLogger>>(dem, config);
     }
     return std::make_unique<FlashBP<Logger<true>>>(dem, config);
 }

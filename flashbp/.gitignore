@@ -1,6 +1,42 @@
+# Whitelist-style ignore file.
+# Ignore everything by default, then allow source, scripts, examples, and
+# project configuration that should be versioned.
 
+*
+!*/
 
-build
+# Core source and runnable project files.
+!src/**
+!scripts/**
+!evaluations/**
+!example.py
 
-**/*.png
-**/*.log
+# Build/package configuration.
+!CMakeLists.txt
+!pyproject.toml
+!setup.py
+!setup.cfg
+!MANIFEST.in
+!requirements*.txt
+!environment*.yml
+!CMakePresets.json
+
+# Documentation and repository metadata.
+!.gitignore
+!README*
+!LICENSE*
+!*.md
+
+# Keep generated artifacts ignored even if they match broad directory rules.
+build/**
+recordings/**
+sweeps/**
+thresholds/**
+*.png
+*.log
+*.mp4
+*.gif
+*.npy
+*.npz
+__pycache__/**
+*.py[cod]

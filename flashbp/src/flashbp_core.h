@@ -96,6 +96,7 @@ extern template class FlashBP<DecodeLogger<true>>;
 extern template class FlashBP<RecordLogger>;
 extern template class FlashBP<TensorLogger>;
 extern template class FlashBP<MLLogger>;
+extern template class FlashBP<SurpriseMLLogger>;
 
 std::unique_ptr<FlashBPBase> make_flashbp(pybind11::object dem,
                                           pybind11::object config);

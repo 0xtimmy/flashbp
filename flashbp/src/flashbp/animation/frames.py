@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize
 
+from flashbp.analytics.style import ACTIVE_CHECK, TRUE_ERROR, UNSATISFIED_CHECK
 from .layout import edges_from_H
 
 
@@ -118,7 +119,7 @@ def render_frame(
     var_ys = [var_pos[v][1] for v in range(num_vars)]
     var_faces = ["#d62728" if decision[v] else "white" for v in range(num_vars)]
     if true_errors is not None:
-        var_edges = ["#1f77b4" if true_errors[v] else "black"
+        var_edges = [TRUE_ERROR if true_errors[v] else "black"
                      for v in range(num_vars)]
         var_lws   = [2.2       if true_errors[v] else 1.0
                      for v in range(num_vars)]
@@ -167,8 +168,8 @@ def render_frame(
     unsat   = _unsatisfied_checks(H, syndrome, decision)
     chk_xs  = [check_pos[d][0] for d in range(num_checks)]
     chk_ys  = [check_pos[d][1] for d in range(num_checks)]
-    chk_faces = ["black" if syndrome[d] else "white" for d in range(num_checks)]
-    chk_edges = ["#ff7f0e" if unsat[d] else "black" for d in range(num_checks)]
+    chk_faces = [ACTIVE_CHECK if syndrome[d] else "white" for d in range(num_checks)]
+    chk_edges = [UNSATISFIED_CHECK if unsat[d] else "black" for d in range(num_checks)]
     chk_lw    = [2.5      if unsat[d] else 1.0      for d in range(num_checks)]
     ax.scatter(chk_xs, chk_ys, s=base_size, c=chk_faces,
                edgecolors=chk_edges, linewidths=chk_lw,

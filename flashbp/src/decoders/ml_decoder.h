@@ -96,3 +96,4 @@ extern template class MaximumLikelihoodDecoder<DecodeLogger<true>>;
 extern template class MaximumLikelihoodDecoder<RecordLogger>;
 extern template class MaximumLikelihoodDecoder<TensorLogger>;
 extern template class MaximumLikelihoodDecoder<MLLogger>;
+extern template class MaximumLikelihoodDecoder<SurpriseMLLogger>;

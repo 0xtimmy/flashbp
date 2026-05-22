@@ -14,6 +14,10 @@ struct MLContractionStep {
     std::vector<int64_t> states;
     std::vector<double>  log_probs;
     std::vector<double>  class_log_probs;
+    std::vector<double>  surprise_scores;
+    double               kl_0_to_1 = 0.0;
+    double               kl_1_to_0 = 0.0;
+    double               js_divergence = 0.0;
 };
 
 struct MLShotRecord {
@@ -83,13 +87,19 @@ public:
                         long long                   num_states,
                         std::vector<int64_t>        states,
                         std::vector<double>         log_probs,
-                        std::vector<double>         class_log_probs = {}) const
+                        std::vector<double>         class_log_probs = {},
+                        std::vector<double>         surprise_scores = {},
+                        double                      kl_0_to_1 = 0.0,
+                        double                      kl_1_to_0 = 0.0,
+                        double                      js_divergence = 0.0) const
     {
         if (ml_state_->shots.empty()) return;
         ml_state_->shots.back().steps.push_back(
-            {axis, error_idx, duration_us, state_bits, num_states,
+             {axis, error_idx, duration_us, state_bits, num_states,
              std::move(states), std::move(log_probs),
-             std::move(class_log_probs)});
+             std::move(class_log_probs),
+             std::move(surprise_scores),
+             kl_0_to_1, kl_1_to_0, js_divergence});
     }
 
     void record_ml_final(std::vector<double> class_log_probs,
@@ -104,4 +114,13 @@ public:
     const std::vector<MLShotRecord>& ml_shots() const {
         return ml_state_->shots;
     }
+};
+
+struct SurpriseMLLogger : public MLLogger {
+    SurpriseMLLogger(unsigned int       lvl,
+                     bool               console,
+                     bool               buffered,
+                     const std::string& log_file)
+        : MLLogger(lvl, console, buffered, log_file)
+    {}
 };

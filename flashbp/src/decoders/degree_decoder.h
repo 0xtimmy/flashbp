@@ -28,7 +28,7 @@ class FlashBPBase;
 //   m_{c -> v} = W_1 - W_0   where
 //     W_b = min { weight[x] - minsum_cost(b, l_v) : x_v = b, parity[x] = 0 }
 //
-// No FVS, no tree-BP, no inter-region reasoning — just a direct enumeration
+// No tree-BP, no inter-region reasoning — just a direct enumeration
 // of each check's neighbourhood per BP iteration.  Degree-1 recovers the
 // standard min-sum equation exactly.
 //

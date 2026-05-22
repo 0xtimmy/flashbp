@@ -1,0 +1,14 @@
+[build-system]
+requires = ["scikit-build-core", "pybind11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "flashbp"
+version = "0.1.0"
+
+[tool.scikit-build]
+build-dir = "build"
+cmake.build-type = "Release"
+wheel.packages = ["src/flashbp"]
+editable.mode = "redirect"
+editable.rebuild = true

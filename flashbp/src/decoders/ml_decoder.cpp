@@ -33,6 +33,68 @@ inline uint64_t pack_bits(const std::vector<uint8_t>& bits) {
 
 constexpr int64_t ML_RECORD_MAX_STATES = 4096;
 
+struct BranchDivergence {
+    double kl_0_to_1 = 0.0;
+    double kl_1_to_0 = 0.0;
+    double js = 0.0;
+};
+
+double logsumexp_all(const std::vector<double>& values) {
+    constexpr double NEG_INF = -std::numeric_limits<double>::infinity();
+    double m = NEG_INF;
+    for (double v : values)
+        if (v > m) m = v;
+    if (m == NEG_INF) return NEG_INF;
+    double sum = 0.0;
+    for (double v : values)
+        if (v != NEG_INF) sum += std::exp(v - m);
+    return m + std::log(sum);
+}
+
+BranchDivergence branch_divergence_from_dist(
+    const std::vector<double>& dist,
+    int64_t                    flip)
+{
+    constexpr double NEG_INF = -std::numeric_limits<double>::infinity();
+    const double logz = logsumexp_all(dist);
+    if (logz == NEG_INF)
+        return {};
+
+    BranchDivergence out;
+    bool inf_01 = false;
+    bool inf_10 = false;
+    const double log_half = std::log(0.5);
+
+    for (int64_t state = 0; state < (int64_t)dist.size(); ++state) {
+        const double lp = dist[(size_t)state] - logz;
+        const int64_t other = state ^ flip;
+        const double lq = (0 <= other && other < (int64_t)dist.size())
+            ? dist[(size_t)other] - logz
+            : NEG_INF;
+
+        const bool p_fin = std::isfinite(lp);
+        const bool q_fin = std::isfinite(lq);
+        if (p_fin) {
+            const double p = std::exp(lp);
+            if (q_fin) out.kl_0_to_1 += p * (lp - lq);
+            else       inf_01 = true;
+            const double lm = logsumexp(lp, lq) + log_half;
+            out.js += 0.5 * p * (lp - lm);
+        }
+        if (q_fin) {
+            const double q = std::exp(lq);
+            if (p_fin) out.kl_1_to_0 += q * (lq - lp);
+            else       inf_10 = true;
+            const double lm = logsumexp(lp, lq) + log_half;
+            out.js += 0.5 * q * (lq - lm);
+        }
+    }
+
+    if (inf_01) out.kl_0_to_1 = std::numeric_limits<double>::infinity();
+    if (inf_10) out.kl_1_to_0 = std::numeric_limits<double>::infinity();
+    return out;
+}
+
 std::vector<double> class_slice_from_dist(
     const std::vector<double>& dist,
     int                        num_detectors,
@@ -243,6 +305,8 @@ std::vector<double> MaximumLikelihoodDecoder<LoggerT>::class_log_probs(
 
         for (int order_pos = 0; order_pos < num_errors_; ++order_pos) {
             const int e = error_order[order_pos];
+            const BranchDivergence branch_div =
+                branch_divergence_from_dist(dist, flips[e]);
             const auto t0 = std::chrono::steady_clock::now();
             std::vector<double> next((size_t)n_states, NEG_INF);
             for (int64_t state = 0; state < n_states; ++state) {
@@ -261,6 +325,7 @@ std::vector<double> MaximumLikelihoodDecoder<LoggerT>::class_log_probs(
             logger_("ML CPU contraction axis=" + std::to_string(e) +
                     "  order=" + std::to_string(order_pos) +
                     "  duration_us=" + std::to_string(us) +
+                    "  js=" + std::to_string(branch_div.js) +
                     "  states=" + std::to_string(n_states), 2);
 
         if constexpr (std::is_base_of_v<MLLogger, LoggerT>) {
@@ -284,7 +349,11 @@ std::vector<double> MaximumLikelihoodDecoder<LoggerT>::class_log_probs(
                 std::move(states_vec), std::move(logp_vec),
                 class_slice_from_dist(
                     dist, num_detectors_, num_observables_,
-                    pack_bits(syndrome)));
+                    pack_bits(syndrome)),
+                {},
+                branch_div.kl_0_to_1,
+                branch_div.kl_1_to_0,
+                branch_div.js);
         }
         }
 
@@ -420,6 +489,49 @@ std::vector<double> MaximumLikelihoodDecoder<LoggerT>::class_log_probs_torch(
         return out;
     };
 
+    auto torch_branch_divergence = [&](const torch::Tensor& src_state) {
+        BranchDivergence out;
+        auto logz = torch::logsumexp(dist, {0});
+        auto lp = dist - logz;
+        auto lq = dist.index_select(0, src_state) - logz;
+        auto finite_p = torch::isfinite(lp);
+        auto finite_q = torch::isfinite(lq);
+        auto both = torch::logical_and(finite_p, finite_q);
+        auto zeros = torch::zeros_like(lp);
+
+        const bool inf_01 = torch::any(
+            torch::logical_and(finite_p, torch::logical_not(finite_q))
+        ).item<bool>();
+        const bool inf_10 = torch::any(
+            torch::logical_and(finite_q, torch::logical_not(finite_p))
+        ).item<bool>();
+
+        if (inf_01) {
+            out.kl_0_to_1 = std::numeric_limits<double>::infinity();
+        } else {
+            out.kl_0_to_1 = torch::where(
+                both, torch::exp(lp) * (lp - lq), zeros
+            ).sum().item<double>();
+        }
+        if (inf_10) {
+            out.kl_1_to_0 = std::numeric_limits<double>::infinity();
+        } else {
+            out.kl_1_to_0 = torch::where(
+                both, torch::exp(lq) * (lq - lp), zeros
+            ).sum().item<double>();
+        }
+
+        auto lm = torch::logaddexp(lp, lq) + std::log(0.5);
+        auto js0 = torch::where(
+            finite_p, torch::exp(lp) * (lp - lm), zeros
+        ).sum();
+        auto js1 = torch::where(
+            finite_q, torch::exp(lq) * (lq - lm), zeros
+        ).sum();
+        out.js = (0.5 * (js0 + js1)).item<double>();
+        return out;
+    };
+
     if constexpr (std::is_base_of_v<MLLogger, LoggerT>) {
         logger_.record_ml_start(
             syndrome,
@@ -446,6 +558,7 @@ std::vector<double> MaximumLikelihoodDecoder<LoggerT>::class_log_probs_torch(
         const double log1 = log_p_[e];
         auto flip = torch::full({1}, flips_host[e], iopts);
         auto src_state = torch::bitwise_xor(states, flip);
+        const BranchDivergence branch_div = torch_branch_divergence(src_state);
         auto no_error  = dist + log0;
         auto yes_error = dist.index_select(0, src_state) + log1;
         dist = torch::logaddexp(no_error, yes_error);
@@ -457,6 +570,7 @@ std::vector<double> MaximumLikelihoodDecoder<LoggerT>::class_log_probs_torch(
         logger_("ML Torch contraction axis=" + std::to_string(e) +
                 "  order=" + std::to_string(order_pos) +
                 "  duration_us=" + std::to_string(us) +
+                "  js=" + std::to_string(branch_div.js) +
                 "  states=" + std::to_string(n_states), 2);
 
         if constexpr (std::is_base_of_v<MLLogger, LoggerT>) {
@@ -475,7 +589,11 @@ std::vector<double> MaximumLikelihoodDecoder<LoggerT>::class_log_probs_torch(
             logger_.record_ml_step(
                 order_pos, e, us, state_bits, n_states,
                 std::move(states_vec), std::move(logp_vec),
-                torch_class_slice());
+                torch_class_slice(),
+                {},
+                branch_div.kl_0_to_1,
+                branch_div.kl_1_to_0,
+                branch_div.js);
         }
     }
 
@@ -611,6 +729,8 @@ bool MaximumLikelihoodDecoder<LoggerT>::class_log_probs_split(
 
         for (size_t local_e = 0; local_e < comp_error_order.size(); ++local_e) {
             const int e = comp_error_order[local_e];
+            const BranchDivergence branch_div =
+                branch_divergence_from_dist(dist, flips[local_e]);
             const auto t0 = std::chrono::steady_clock::now();
             std::vector<double> next((size_t)c_states, NEG_INF);
             for (int64_t state = 0; state < c_states; ++state) {
@@ -630,6 +750,7 @@ bool MaximumLikelihoodDecoder<LoggerT>::class_log_probs_split(
                     "  axis=" + std::to_string(e) +
                     "  order=" + std::to_string(local_e) +
                     "  duration_us=" + std::to_string(us) +
+                    "  js=" + std::to_string(branch_div.js) +
                     "  states=" + std::to_string(c_states), 2);
 
             if constexpr (std::is_base_of_v<MLLogger, LoggerT>) {
@@ -668,7 +789,11 @@ bool MaximumLikelihoodDecoder<LoggerT>::class_log_probs_split(
                 logger_.record_ml_step(
                     (int)local_e, e, us, c_state_bits, c_states,
                     std::move(states_vec), std::move(logp_vec),
-                    xor_convolve_classes(out_logp, partial_comp_logp));
+                    xor_convolve_classes(out_logp, partial_comp_logp),
+                    {},
+                    branch_div.kl_0_to_1,
+                    branch_div.kl_1_to_0,
+                    branch_div.js);
             }
         }
 
@@ -817,3 +942,4 @@ template class MaximumLikelihoodDecoder<DecodeLogger<true>>;
 template class MaximumLikelihoodDecoder<RecordLogger>;
 template class MaximumLikelihoodDecoder<TensorLogger>;
 template class MaximumLikelihoodDecoder<MLLogger>;
+template class MaximumLikelihoodDecoder<SurpriseMLLogger>;
