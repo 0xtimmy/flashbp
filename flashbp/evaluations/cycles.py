@@ -20,6 +20,7 @@ from _common import (
     CODES,
     layout_for_code,
     load_cached_shot,
+    p_token,
     prepare_output_dir,
     resolve_code_and_p,
 )
@@ -55,9 +56,9 @@ def main():
     output_dir = Path(
         args.output_dir
         or (
-            f"results/cycles/{cache_path.stem}_{args.shot_index}_all"
+            f"results/cycles/{code_name}_{p_token(p)}.{cache_path.stem}_{args.shot_index}_all"
             if cache_path is not None
-            else f"results/cycles/{code_name}_all"
+            else f"results/cycles/{code_name}_{p_token(p)}.all"
         )
     )
 

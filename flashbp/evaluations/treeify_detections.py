@@ -6,7 +6,7 @@ Typical workflow:
     python evaluations/treeify_detections.py --cache results/errors/steane_0p15.5.npz
 
 The default output directory is:
-    results/trees/{cache_stem}_{shot_index}/
+    results/trees/{code}_{p}.{cache_stem}_{shot_index}/
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import numpy as np
 import flashbp
 from flashbp import DecoderConfig
 from flashbp.analytics import plot_treeified_tanner_graph
-from _common import CODES
+from _common import CODES, p_token
 
 
 def parse_args():
@@ -102,9 +102,9 @@ def main():
     output_dir = Path(
         args.output_dir
         or (
-            f"results/trees/{code_name}_syndrome"
+            f"results/trees/{code_name}_{p_token(float(p))}.syndrome"
             if cache_path is None
-            else f"results/trees/{cache_path.stem}_{args.shot_index}"
+            else f"results/trees/{code_name}_{p_token(float(p))}.{cache_path.stem}_{args.shot_index}"
         )
     )
     prepare_output_dir(output_dir, args.force)

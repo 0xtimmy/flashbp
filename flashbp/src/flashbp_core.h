@@ -12,6 +12,7 @@
 #include "loggers/record_logger.h"
 #include "loggers/tensor_logger.h"
 #include "loggers/ml_logger.h"
+#include "loggers/gbp_logger.h"
 
 class Decoder;
 
@@ -28,6 +29,7 @@ public:
     virtual pybind11::array_t<uint8_t> decode(pybind11::array_t<uint8_t> syndrome,
                                               int max_iter) const = 0;
     virtual void flush() = 0;
+    virtual pybind11::dict last_decode_stats() const = 0;
 
     // Decode-context setters — no-op by default, active for DecodeLogger<true> and subclasses
     virtual void set_batch(unsigned int)     noexcept {}
@@ -62,6 +64,7 @@ public:
     pybind11::array_t<uint8_t> decode(pybind11::array_t<uint8_t> syndrome,
                                       int max_iter) const override;
     void flush() override { logger_.flush(); }
+    pybind11::dict last_decode_stats() const override;
 
     // Forward context setters to any logger derived from DecodeLogger<true>
     void set_batch(unsigned int b) noexcept override {
@@ -95,6 +98,7 @@ extern template class FlashBP<Logger<true>>;
 extern template class FlashBP<DecodeLogger<true>>;
 extern template class FlashBP<RecordLogger>;
 extern template class FlashBP<TensorLogger>;
+extern template class FlashBP<GBPLogger>;
 extern template class FlashBP<MLLogger>;
 extern template class FlashBP<SurpriseMLLogger>;
 

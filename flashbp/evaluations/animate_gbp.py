@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument("--syndrome", type=str, default=None)
     parser.add_argument("--decoder", type=str, default="gbp-cycles:8",
                         help="GBP decoder spec, e.g. gbp-check:2, "
-                             "gbp-cycles:8, gbp-union-cycles-any:8")
+                             "gbp-cycles:8:sparse, gbp-union-cycles-any:8")
     parser.add_argument("--max-iter", type=int, default=20)
     parser.add_argument("--seed", type=int, default=650)
     parser.add_argument("--output-dir", type=str, default=None)
@@ -63,9 +63,9 @@ def main():
     output_dir = Path(
         args.output_dir
         or (
-            f"results/recordings/gbp/{cache_path.stem}_{args.shot_index}_{label_token}"
+            f"results/recordings/gbp/{code_name}_{p_token(p)}.{cache_path.stem}_{args.shot_index}_{label_token}"
             if cache_path is not None
-            else f"results/recordings/gbp/{code_name}_p{p_token(p)}_{label_token}"
+            else f"results/recordings/gbp/{code_name}_{p_token(p)}.{label_token}"
         )
     )
     prepare_output_dir(output_dir, args.force)
@@ -75,7 +75,7 @@ def main():
 
     cfg = spec.config
     cfg.log = True
-    cfg.log_type = "record"
+    cfg.log_type = "gbp"
     cfg.log_file = str(output_dir / "log.txt")
     cfg.log_level = 5
     cfg.log_console = True

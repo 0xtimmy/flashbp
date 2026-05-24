@@ -14,6 +14,14 @@ Decoder specs (CLI ``--decoders``) use a compact syntax, comma-separated:
     gbp-cycles-all:8    GBPDecoder with cycles where all checks are active
     gbp-union-cycles:8  GBPDecoder with overlapping cycles unioned into regions
     gbp:8:<policy>      Explicit GBP region policy, e.g. gbp:8:short_cycles
+    gbp-cycles:8:sparse GBPDecoder using sparse_cpu
+    gbp-cycles:8:sparse:states=2^24
+                         sparse_cpu with a larger valid-state budget
+    gbp-cycles:8:sparse:boost=2
+                         amplify GBP region messages after repeated hard
+                         decisions are detected
+    gbp-cycles:8:sparse:boost=2:boost_cap=16
+                         same, with an explicit amplification cap
     ml                  MaximumLikelihoodDecoder
 
 Examples:
@@ -29,9 +37,51 @@ Examples:
 
 Outputs:
     <output-dir>/sweep.png          log-log plot
+    <output-dir>/convergence.png    convergence-rate plot
+    <output-dir>/convergence_iterations.png
+                                    histogram of convergence iterations
+    <output-dir>/residual_weight.png
+                                    histogram of final residual syndrome weight
     <output-dir>/time_per_shot.png  average decoder time per shot plot
     <output-dir>/sweep.csv          resumable raw rows
     <output-dir>/samples.npz        sampled syndromes/observables reused by runs
+
+Plot conventions:
+    Colors identify decoders and are reused across all plots.  When a plot has
+    both "all" and "converged" curves for one decoder, the solid line is over
+    all sampled shots and the dotted line is restricted to shots whose final
+    correction satisfies the measured syndrome.  Error bars are binomial
+    standard errors; zero logical-error points are continuity-corrected for
+    log-scale visibility.
+
+    sweep.png:
+        x-axis is physical error rate p.  y-axis is logical error rate.  The
+        light-gray y=x reference marks the no-code baseline.  Solid decoder
+        curves count every shot.  Dotted same-color curves show logical error
+        conditioned on convergence, so they answer "when this decoder satisfies
+        the syndrome, how often is it logically correct?"
+
+    convergence.png:
+        x-axis is p.  y-axis is the fraction of shots whose final correction
+        satisfies the syndrome.  ML and BP+OSD are treated as always converged
+        because they do not expose iterative BP-style convergence.
+
+    convergence_iterations.png:
+        A violin plot of convergence iteration distributions, grouped by p.
+        Each violin shows the empirical shot distribution for one decoder at
+        one p; overlapping violins use transparency.  y=0 is reserved for
+        direct/non-iterative decoders, and y=max_iter+1 means "did not
+        converge."  The horizontal mark inside each violin is the mean.
+
+    residual_weight.png:
+        A violin plot grouped by p.  The y-axis is final residual syndrome
+        weight, i.e. the number of unsatisfied checks after decoding.  A value
+        of 0 means the decoder converged by the syndrome-satisfaction test.
+
+    time_per_shot.png:
+        x-axis is p.  y-axis is average wall-clock decode time per shot in
+        seconds.  Solid lines average over all shots; dotted same-color lines
+        average only over converged shots.
 """
 import argparse
 import csv
@@ -56,10 +106,16 @@ CSV_COLUMNS = [
     "p",
     "logical_err",
     "logical_err_stderr",
+    "converged_logical_err",
+    "converged_logical_err_stderr",
     "shots",
+    "convergence_rate",
+    "convergence_rate_stderr",
     "time_per_shot_s",
     "converged_shots",
     "converged_time_per_shot_s",
+    "convergence_iter_hist",
+    "residual_weight_hist",
 ]
 
 
@@ -83,6 +139,30 @@ def syndrome_satisfied(decoder, syndrome: np.ndarray, correction: np.ndarray) ->
     return bool(np.array_equal(predicted.astype(np.uint8), syndrome.astype(np.uint8)))
 
 
+def residual_syndrome_weight(decoder, syndrome: np.ndarray, correction: np.ndarray) -> int:
+    predicted = (decoder.H @ correction.astype(np.int32)) % 2
+    residual = predicted.astype(np.uint8) ^ syndrome.astype(np.uint8)
+    return int(residual.sum())
+
+
+def add_hist_count(hist: list[int], index: int) -> None:
+    if index < 0:
+        return
+    if index >= len(hist):
+        hist.extend([0] * (index + 1 - len(hist)))
+    hist[index] += 1
+
+
+def parse_hist(text: str | None) -> list[int]:
+    if not text:
+        return []
+    try:
+        values = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    return [int(v) for v in values]
+
+
 def p_key(p: float) -> str:
     return f"{float(p):.12g}"
 
@@ -93,6 +173,13 @@ def logical_err_stderr(err: float, shots: int) -> float:
     # Continuity correction keeps zero-failure runs visibly less certain than
     # infinite data, especially on log plots.
     p_hat = float(np.clip(err, 0.5 / shots, 1.0 - 0.5 / shots))
+    return float(np.sqrt(p_hat * (1.0 - p_hat) / shots))
+
+
+def binomial_stderr(rate: float, shots: int) -> float:
+    if not np.isfinite(rate) or shots <= 0:
+        return float("nan")
+    p_hat = float(np.clip(rate, 0.0, 1.0))
     return float(np.sqrt(p_hat * (1.0 - p_hat) / shots))
 
 
@@ -109,6 +196,25 @@ def read_sweep_rows(csv_path: Path) -> list[dict[str, str]]:
                 row["logical_err_stderr"] = f"{logical_err_stderr(err, shots):.9g}"
             except (KeyError, TypeError, ValueError):
                 row["logical_err_stderr"] = ""
+        try:
+            shots = int(row["shots"])
+            converged_shots = int(row.get("converged_shots", "0") or 0)
+            if row.get("convergence_rate", "") == "":
+                row["convergence_rate"] = f"{converged_shots / max(shots, 1):.9g}"
+            if row.get("convergence_rate_stderr", "") == "":
+                row["convergence_rate_stderr"] = (
+                    f"{binomial_stderr(float(row['convergence_rate']), shots):.9g}"
+                )
+            if row.get("converged_logical_err", "") == "" and converged_shots == shots:
+                row["converged_logical_err"] = row.get("logical_err", "")
+            if row.get("converged_logical_err_stderr", "") == "" and row.get("converged_logical_err", "") != "":
+                row["converged_logical_err_stderr"] = (
+                    f"{logical_err_stderr(float(row['converged_logical_err']), converged_shots):.9g}"
+                )
+            row.setdefault("convergence_iter_hist", "")
+            row.setdefault("residual_weight_hist", "")
+        except (KeyError, TypeError, ValueError):
+            pass
         for column in CSV_COLUMNS:
             row.setdefault(column, "")
     return rows
@@ -259,17 +365,28 @@ def ensure_sample_cache(
 
 
 def rows_by_decoder(rows: list[dict[str, str]]) -> dict[str, list[dict[str, float]]]:
+    def optional_float(value: str | None) -> float:
+        if value is None or value == "":
+            return float("nan")
+        return float(value)
+
     grouped: dict[str, list[dict[str, float]]] = {}
     for row in rows:
         try:
             parsed = {
                 "p": float(row["p"]),
                 "logical_err": float(row["logical_err"]),
-                "logical_err_stderr": float(row.get("logical_err_stderr", "nan")),
+                "logical_err_stderr": optional_float(row.get("logical_err_stderr")),
+                "converged_logical_err": optional_float(row.get("converged_logical_err")),
+                "converged_logical_err_stderr": optional_float(row.get("converged_logical_err_stderr")),
                 "shots": int(row["shots"]),
-                "time_per_shot_s": float(row["time_per_shot_s"]),
+                "convergence_rate": optional_float(row.get("convergence_rate")),
+                "convergence_rate_stderr": optional_float(row.get("convergence_rate_stderr")),
+                "time_per_shot_s": optional_float(row.get("time_per_shot_s")),
                 "converged_shots": int(row["converged_shots"]),
-                "converged_time_per_shot_s": float(row["converged_time_per_shot_s"]),
+                "converged_time_per_shot_s": optional_float(row.get("converged_time_per_shot_s")),
+                "convergence_iter_hist": parse_hist(row.get("convergence_iter_hist")),
+                "residual_weight_hist": parse_hist(row.get("residual_weight_hist")),
             }
         except (KeyError, TypeError, ValueError):
             continue
@@ -277,6 +394,93 @@ def rows_by_decoder(rows: list[dict[str, str]]) -> dict[str, list[dict[str, floa
     for pts in grouped.values():
         pts.sort(key=lambda pt: (pt["p"], pt["shots"]))
     return grouped
+
+
+def merge_histograms(pts: list[dict[str, float]], key: str) -> np.ndarray:
+    size = 0
+    for pt in pts:
+        size = max(size, len(pt.get(key, [])))
+    hist = np.zeros(size, dtype=np.float64)
+    for pt in pts:
+        values = np.asarray(pt.get(key, []), dtype=np.float64)
+        if values.size:
+            hist[:values.size] += values
+    return hist
+
+
+def expand_histogram(hist: list[int]) -> np.ndarray:
+    values: list[int] = []
+    for value, count in enumerate(hist):
+        if count > 0:
+            values.extend([value] * int(count))
+    return np.asarray(values, dtype=np.float64)
+
+
+def plot_histogram_violins_by_p(
+    ax,
+    results: dict[str, list[dict[str, float]]],
+    hist_key: str,
+    title: str,
+    ylabel: str,
+    p_values: np.ndarray,
+) -> None:
+    labels = list(results.keys())
+    if not labels:
+        return
+
+    base_positions = np.arange(len(p_values), dtype=np.float64)
+    group_width = min(0.82, 0.18 * max(1, len(labels)))
+    offsets = (
+        np.linspace(-group_width / 2, group_width / 2, len(labels))
+        if len(labels) > 1
+        else np.array([0.0])
+    )
+    width = min(0.72 / max(1, len(labels)), 0.28)
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    for decoder_i, label in enumerate(labels):
+        pts_by_p = {p_key(pt["p"]): pt for pt in results[label]}
+        datasets = []
+        positions = []
+        for p_i, p in enumerate(p_values):
+            pt = pts_by_p.get(p_key(float(p)))
+            if pt is None:
+                continue
+            values = expand_histogram(pt.get(hist_key, []))
+            if values.size == 0:
+                continue
+            datasets.append(values)
+            positions.append(base_positions[p_i] + offsets[decoder_i])
+        if not datasets:
+            continue
+
+        parts = ax.violinplot(
+            datasets,
+            positions=positions,
+            widths=width,
+            showmeans=True,
+            showmedians=False,
+            showextrema=False,
+        )
+        color = colors[decoder_i % len(colors)]
+        for body in parts["bodies"]:
+            body.set_facecolor(color)
+            body.set_edgecolor(color)
+            body.set_alpha(0.32)
+            body.set_linewidth(1.0)
+        if "cmeans" in parts:
+            parts["cmeans"].set_color(color)
+            parts["cmeans"].set_linewidth(2.0)
+            parts["cmeans"].set_alpha(0.9)
+        ax.plot([], [], color=color, linewidth=8, alpha=0.32, label=label)
+
+    ax.set_xticks(base_positions)
+    ax.set_xticklabels([f"{float(p):.3g}" for p in p_values], rotation=45, ha="right")
+    ax.set_xlabel("Physical error rate p")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend()
 
 
 def parse_args():
@@ -391,10 +595,16 @@ def main():
                     "p": f"{float(p):.12g}",
                     "logical_err": f"{err:.9g}",
                     "logical_err_stderr": f"{logical_err_stderr(err, args.shots):.9g}",
+                    "converged_logical_err": f"{float('nan'):.9g}",
+                    "converged_logical_err_stderr": f"{float('nan'):.9g}",
                     "shots": str(args.shots),
+                    "convergence_rate": f"{float('nan'):.9g}",
+                    "convergence_rate_stderr": f"{float('nan'):.9g}",
                     "time_per_shot_s": f"{float('nan'):.9g}",
                     "converged_shots": "0",
                     "converged_time_per_shot_s": f"{float('nan'):.9g}",
+                    "convergence_iter_hist": "",
+                    "residual_weight_hist": "",
                 })
                 done.add(row_key)
                 continue
@@ -404,6 +614,9 @@ def main():
             converged_decode_time = 0.0
             converged_shots = 0
             correct = 0
+            converged_correct = 0
+            convergence_iter_hist = [0] * (args.max_iter + 2)
+            residual_weight_hist = [0] * (bp.num_detectors + 1)
             shot_iter = zip(det, obs)
             if use_progress:
                 shot_iter = tqdm(
@@ -418,13 +631,42 @@ def main():
                 r = bp.decode(syn.astype(np.uint8), args.max_iter)
                 shot_dt = time.perf_counter() - shot_t0
                 total_decode_time += shot_dt
-                if always_converged or syndrome_satisfied(bp, syn, r):
+                residual_weight = residual_syndrome_weight(bp, syn, r)
+                add_hist_count(residual_weight_hist, residual_weight)
+                if always_converged:
+                    converged = True
+                    convergence_iter = 0
+                else:
+                    stats = (
+                        bp.last_decode_stats()
+                        if hasattr(bp, "last_decode_stats")
+                        else {}
+                    )
+                    converged = bool(stats.get("converged", residual_weight == 0))
+                    if residual_weight != 0:
+                        converged = False
+                    convergence_iter = (
+                        int(stats.get("iterations", args.max_iter))
+                        if converged
+                        else args.max_iter + 1
+                    )
+                add_hist_count(convergence_iter_hist, convergence_iter)
+                if converged:
                     converged_decode_time += shot_dt
                     converged_shots += 1
                 pred = (bp.L @ r.astype(np.int32)) % 2
-                if np.array_equal(pred, ob.astype(np.int32)):
+                is_correct = np.array_equal(pred, ob.astype(np.int32))
+                if is_correct:
                     correct += 1
+                if converged and is_correct:
+                    converged_correct += 1
             err = 1.0 - correct / args.shots
+            converged_err = (
+                1.0 - converged_correct / converged_shots
+                if converged_shots
+                else float("nan")
+            )
+            convergence_rate = converged_shots / max(args.shots, 1)
             dt = total_decode_time
             time_per_shot = dt / max(args.shots, 1)
             converged_time_per_shot = (
@@ -446,10 +688,16 @@ def main():
                 "p": f"{float(p):.12g}",
                 "logical_err": f"{err:.9g}",
                 "logical_err_stderr": f"{logical_err_stderr(err, args.shots):.9g}",
+                "converged_logical_err": f"{converged_err:.9g}",
+                "converged_logical_err_stderr": f"{logical_err_stderr(converged_err, converged_shots):.9g}",
                 "shots": str(args.shots),
+                "convergence_rate": f"{convergence_rate:.9g}",
+                "convergence_rate_stderr": f"{binomial_stderr(convergence_rate, args.shots):.9g}",
                 "time_per_shot_s": f"{time_per_shot:.9g}",
                 "converged_shots": str(converged_shots),
                 "converged_time_per_shot_s": f"{converged_time_per_shot:.9g}",
+                "convergence_iter_hist": json.dumps(convergence_iter_hist, separators=(",", ":")),
+                "residual_weight_hist": json.dumps(residual_weight_hist, separators=(",", ":")),
             })
             done.add(row_key)
         if use_progress:
@@ -469,7 +717,7 @@ def main():
     results = rows_by_decoder(all_rows)
 
     # ── plot ────────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(32, 24))
     log_x = args.log_x and not args.linear
     log_y = args.log_y and not args.linear
 
@@ -482,19 +730,36 @@ def main():
         xs = np.array([pt["p"] for pt in pts])
         ys = np.array([pt["logical_err"] for pt in pts])
         yerr = np.array([pt["logical_err_stderr"] for pt in pts])
+        conv_ys = np.array([pt["converged_logical_err"] for pt in pts])
+        conv_yerr = np.array([pt["converged_logical_err_stderr"] for pt in pts])
+        conv_shots = np.array([pt["converged_shots"] for pt in pts])
         shots = np.array([pt["shots"] for pt in pts])
         # clip zeros so log-y doesn't choke
         if log_y:
             ys = np.where(ys > 0, ys, 0.5 / np.maximum(shots, 1))
-        ax.errorbar(
+            conv_ys = np.where(conv_ys > 0, conv_ys, 0.5 / np.maximum(conv_shots, 1))
+        line = ax.errorbar(
             xs,
             ys,
             yerr=yerr,
             marker="o",
             linestyle="-",
             capsize=3,
-            label=label,
+            label=f"{label} all",
         )
+        finite_conv = np.isfinite(conv_ys) & np.isfinite(conv_yerr) & (conv_shots > 0)
+        if np.any(finite_conv):
+            ax.errorbar(
+                xs[finite_conv],
+                conv_ys[finite_conv],
+                yerr=conv_yerr[finite_conv],
+                marker="o",
+                linestyle=":",
+                linewidth=1.8,
+                capsize=3,
+                color=line.lines[0].get_color(),
+                label=f"{label} converged",
+            )
     if log_x: ax.set_xscale("log")
     if log_y: ax.set_yscale("log")
     ax.set_xlabel("Physical error rate p")
@@ -512,8 +777,84 @@ def main():
         print(f"Plot   : skipped existing {plot_path}")
     plt.close(fig)
 
+    # ── convergence-rate plot ───────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(32, 24))
+    for label, pts in results.items():
+        xs = np.array([pt["p"] for pt in pts])
+        ys = np.array([pt["convergence_rate"] for pt in pts])
+        yerr = np.array([pt["convergence_rate_stderr"] for pt in pts])
+        finite = np.isfinite(ys) & np.isfinite(yerr)
+        if not np.any(finite):
+            continue
+        ax.errorbar(
+            xs[finite],
+            ys[finite],
+            yerr=yerr[finite],
+            marker="o",
+            linestyle="-",
+            capsize=3,
+            label=label,
+        )
+    if log_x:
+        ax.set_xscale("log")
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xlabel("Physical error rate p")
+    ax.set_ylabel("Convergence rate")
+    ax.set_title(f"{code} decoder convergence rate")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+
+    convergence_plot_path = output_dir / "convergence.png"
+    if confirm_existing_path(convergence_plot_path, "Convergence plot", args.force):
+        fig.savefig(convergence_plot_path, dpi=150)
+        print(f"Conv   : {convergence_plot_path}")
+    else:
+        print(f"Conv   : skipped existing {convergence_plot_path}")
+    plt.close(fig)
+
+    # ── convergence-iteration violin plot ───────────────────────────────────
+    fig, ax = plt.subplots(figsize=(32, 24))
+    plot_histogram_violins_by_p(
+        ax,
+        results,
+        "convergence_iter_hist",
+        f"{code} convergence iteration distribution by p",
+        f"Convergence iteration (0 = direct decoder, {args.max_iter + 1} = not converged)",
+        ps,
+    )
+    fig.tight_layout()
+
+    iter_hist_path = output_dir / "convergence_iterations.png"
+    if confirm_existing_path(iter_hist_path, "Convergence-iteration violin plot", args.force):
+        fig.savefig(iter_hist_path, dpi=150)
+        print(f"Iters  : {iter_hist_path}")
+    else:
+        print(f"Iters  : skipped existing {iter_hist_path}")
+    plt.close(fig)
+
+    # ── residual-syndrome-weight violin plot ────────────────────────────────
+    fig, ax = plt.subplots(figsize=(32, 24))
+    plot_histogram_violins_by_p(
+        ax,
+        results,
+        "residual_weight_hist",
+        f"{code} final residual syndrome weight distribution by p",
+        "Final residual syndrome weight",
+        ps,
+    )
+    fig.tight_layout()
+
+    residual_hist_path = output_dir / "residual_weight.png"
+    if confirm_existing_path(residual_hist_path, "Residual-weight violin plot", args.force):
+        fig.savefig(residual_hist_path, dpi=150)
+        print(f"Resid  : {residual_hist_path}")
+    else:
+        print(f"Resid  : skipped existing {residual_hist_path}")
+    plt.close(fig)
+
     # ── time-per-shot plot ─────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(32, 24))
     for label, pts in results.items():
         xs = np.array([pt["p"] for pt in pts])
         ys = np.array([pt["time_per_shot_s"] for pt in pts])

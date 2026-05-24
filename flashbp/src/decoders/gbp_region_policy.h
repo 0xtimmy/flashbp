@@ -5,6 +5,12 @@
 #include <string>
 #include <vector>
 
+struct GBPRegionBudget {
+    int max_axes = 22;
+    uint64_t max_states = uint64_t{1} << 22;
+    bool use_valid_state_estimate = false;
+};
+
 struct TannerEdge {
     int check;
     int var;
@@ -24,6 +30,13 @@ enum class GBPRegionActivation {
     Always,
     AnyCheckActive,
     AllChecksActive,
+};
+
+struct GBPManualGroup {
+    std::vector<int> data;
+    std::vector<int> checks;
+    GBPRegionActivation activation = GBPRegionActivation::Always;
+    int center_check = -1;
 };
 
 struct GBPRegion {
@@ -54,7 +67,7 @@ public:
 
 class CheckNeighborhoodPolicy : public RegionGroupingPolicy {
 public:
-    CheckNeighborhoodPolicy(int degree, int max_axes);
+    CheckNeighborhoodPolicy(int degree, GBPRegionBudget budget);
 
     std::vector<GBPRegion> build_regions(
         int num_detectors,
@@ -69,13 +82,13 @@ public:
 
 private:
     int degree_;
-    int max_axes_;
+    GBPRegionBudget budget_;
 };
 
 class ShortCyclePolicy : public RegionGroupingPolicy {
 public:
     ShortCyclePolicy(int max_length,
-                     int max_axes,
+                     GBPRegionBudget budget,
                      GBPRegionActivation activation,
                      bool union_overlaps,
                      std::string name);
@@ -93,14 +106,39 @@ public:
 
 private:
     int max_length_;
-    int max_axes_;
+    GBPRegionBudget budget_;
     GBPRegionActivation activation_;
     bool union_overlaps_;
     std::string name_;
 };
 
+class ManualGroupPolicy : public RegionGroupingPolicy {
+public:
+    ManualGroupPolicy(std::vector<GBPManualGroup> groups,
+                      GBPRegionBudget budget,
+                      bool add_single_check_regions = true);
+
+    std::vector<GBPRegion> build_regions(
+        int num_detectors,
+        int num_errors,
+        const std::vector<TannerEdge>& edges,
+        const std::vector<std::vector<int>>& var_edges,
+        const std::vector<std::vector<int>>& check_edges,
+        std::vector<int>& edge_axis_pos
+    ) const override;
+
+    const char* name() const override { return "manual_groups"; }
+
+private:
+    std::vector<GBPManualGroup> groups_;
+    GBPRegionBudget budget_;
+    bool add_single_check_regions_;
+};
+
 std::unique_ptr<RegionGroupingPolicy> make_region_grouping_policy(
     const std::string& policy,
     int degree,
-    int max_axes
+    GBPRegionBudget budget,
+    std::vector<GBPManualGroup> manual_groups = {},
+    bool manual_add_single_check_regions = true
 );

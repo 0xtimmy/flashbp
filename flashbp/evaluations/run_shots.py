@@ -36,7 +36,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--code",     choices=CODES.keys(),    default="steane")
     parser.add_argument("--decoder",  type=str,                default="simple",
-                        help="decoder spec, e.g. simple, ml, gbp-cycles:8, bp-osd:0")
+                        help="decoder spec, e.g. simple, ml, gbp-cycles:8, "
+                             "gbp-cycles:8:sparse, bp-osd:0")
     parser.add_argument("--p",        type=float,              default=0.05,
                         help="physical error rate")
     parser.add_argument("--shots",    type=int,                default=1000)

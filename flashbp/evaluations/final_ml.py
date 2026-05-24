@@ -99,9 +99,9 @@ def main():
     output = Path(
         args.output
         or (
-            f"results/final_ml/{cache_path.stem}_{args.shot_index}.png"
+            f"results/final_ml/{code_name}_{p_token(p)}.{cache_path.stem}_{args.shot_index}.png"
             if cache_path is not None
-            else f"results/final_ml/{code_name}_p{p_token(p)}.png"
+            else f"results/final_ml/{code_name}_{p_token(p)}.final_ml.png"
         )
     )
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -20,7 +20,7 @@ import numpy as np
 import flashbp
 from flashbp import DecoderConfig
 from flashbp.analytics import plot_syndrome_graph
-from _common import CODES, layout_for_code
+from _common import CODES, layout_for_code, p_token
 
 
 def parse_args():
@@ -103,9 +103,9 @@ def main():
     output = Path(
         args.output
         or (
-            f"results/syndromes/{cache_path.stem}_{args.shot_index}.png"
+            f"results/syndromes/{code_name}_{p_token(float(p))}.{cache_path.stem}_{args.shot_index}.png"
             if cache_path is not None
-            else f"results/syndromes/{code_name}_p{str(float(p)).replace('.', 'p')}.png"
+            else f"results/syndromes/{code_name}_{p_token(float(p))}.syndrome.png"
         )
     )
     layout = layout_for_code(code)

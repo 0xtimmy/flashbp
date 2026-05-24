@@ -17,6 +17,7 @@ import flashbp
 from flashbp import DecoderConfig
 from flashbp.analytics import plot_detector_distance_graph
 from _common import CODES, layout_for_code, load_cached_shot, resolve_code_and_p
+from _common import p_token
 
 
 def parse_args():
@@ -93,9 +94,9 @@ def main():
         else Path(
             args.output_dir
             or (
-                f"results/distance/{cache_path.stem}_{args.shot_index}"
+                f"results/distance/{code_name}_{p_token(p)}.{cache_path.stem}_{args.shot_index}"
                 if cache_path is not None
-                else f"results/distance/{code_name}_p{str(p).replace('.', 'p')}"
+                else f"results/distance/{code_name}_{p_token(p)}.distance"
             )
         ) / "detector_distance.png"
     )

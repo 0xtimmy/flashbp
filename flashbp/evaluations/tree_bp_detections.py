@@ -6,7 +6,7 @@ Typical workflow:
     python evaluations/tree_bp_detections.py --cache results/errors/steane_0p15.5.npz
 
 The default output directory is:
-    results/tree_bp/{cache_stem}_{shot_index}/
+    results/tree_bp/{code}_{p}.{cache_stem}_{shot_index}/
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import numpy as np
 import flashbp
 from flashbp import DecoderConfig
 from flashbp.analytics import plot_tree_bp_marginals
-from _common import CODES
+from _common import CODES, p_token
 
 
 def parse_args():
@@ -111,9 +111,9 @@ def main():
     output_dir = Path(
         args.output_dir
         or (
-            f"results/tree_bp/{code_name}_syndrome"
+            f"results/tree_bp/{code_name}_{p_token(float(p))}.syndrome"
             if cache_path is None
-            else f"results/tree_bp/{cache_path.stem}_{args.shot_index}"
+            else f"results/tree_bp/{code_name}_{p_token(float(p))}.{cache_path.stem}_{args.shot_index}"
         )
     )
     prepare_output_dir(output_dir, args.force)

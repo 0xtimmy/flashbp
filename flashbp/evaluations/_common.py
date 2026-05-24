@@ -30,6 +30,8 @@ CODES = {
 GBP_POLICY_KEYS = {
     "gbp": "check_neighborhood",
     "gbp-check": "check_neighborhood",
+    "gbp-manual": "manual_groups",
+    "gbp-groups": "manual_groups",
     "gbp-cycles": "short_cycles",
     "gbp-cycles-any": "short_cycles_any_active",
     "gbp-cycles-all": "short_cycles_all_active",
@@ -38,7 +40,67 @@ GBP_POLICY_KEYS = {
     "gbp-union-cycles-all": "short_cycles_union_all_active",
 }
 
+GBP_BACKEND_KEYS = {
+    "cpu": "dense_cpu",
+    "dense": "dense_cpu",
+    "dense-cpu": "dense_cpu",
+    "dense_cpu": "dense_cpu",
+    "sparse": "sparse_cpu",
+    "sparse-cpu": "sparse_cpu",
+    "sparse_cpu": "sparse_cpu",
+    "cuda": "torch_cuda",
+    "torch": "torch_cuda",
+    "torch-cuda": "torch_cuda",
+    "torch_cuda": "torch_cuda",
+}
+
 BP_OSD_KEYS = {"bp-osd", "bposd", "bp_osd"}
+
+
+def parse_int_budget(text: str) -> int:
+    clean = text.replace("_", "").strip().lower()
+    if clean.startswith("2^"):
+        return 1 << int(clean[2:])
+    suffixes = {"k": 10, "m": 20, "g": 30}
+    if clean[-1:] in suffixes:
+        return int(float(clean[:-1]) * (1 << suffixes[clean[-1]]))
+    return int(clean, 0)
+
+
+def apply_gbp_extra_field(cfg: DecoderConfig, field: str, spec: str) -> None:
+    if not field:
+        return
+    if field in GBP_BACKEND_KEYS:
+        cfg.gbp_backend = GBP_BACKEND_KEYS[field]
+        return
+    if field.startswith(("states=", "max_states=", "max-states=")):
+        _, value = field.split("=", 1)
+        cfg.gbp_max_states = parse_int_budget(value)
+        return
+    if field.startswith(("boost=", "osc_boost=", "oscillation_boost=")):
+        _, value = field.split("=", 1)
+        cfg.gbp_oscillation_boost = float(value)
+        return
+    if field.startswith(("boost_cap=", "boost-cap=", "oscillation_boost_cap=")):
+        _, value = field.split("=", 1)
+        cfg.gbp_oscillation_boost_cap = float(value)
+        return
+    if field.startswith(("groups=", "manual_groups=", "manual-groups=")):
+        _, value = field.split("=", 1)
+        path = Path(value)
+        with path.open("r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        cfg.gbp_manual_groups = (
+            loaded.get("groups", loaded) if isinstance(loaded, dict) else loaded
+        )
+        return
+    if field in ("no_single_checks", "no-single-checks", "no_checks", "no-checks"):
+        cfg.gbp_manual_add_single_checks = False
+        return
+    if field in ("single_checks", "single-checks"):
+        cfg.gbp_manual_add_single_checks = True
+        return
+    raise ValueError(f"unknown GBP field {field!r} in decoder spec {spec!r}")
 
 
 @dataclass
@@ -67,13 +129,50 @@ def parse_decoder_spec(spec: str) -> DecoderSpec:
         cfg = DecoderConfig(decoder="gbp")
         cfg.region_policy = GBP_POLICY_KEYS[name]
         if len(parts) > 1 and parts[1]:
-            cfg.degree = int(parts[1])
+            if parts[1].lstrip("+-").isdigit():
+                cfg.degree = int(parts[1])
+            elif parts[1] in GBP_BACKEND_KEYS or "=" in parts[1]:
+                apply_gbp_extra_field(cfg, parts[1], spec)
+            else:
+                cfg.region_policy = parts[1]
         if len(parts) > 2 and parts[2]:
-            cfg.region_policy = parts[2]
-        if len(parts) > 3:
+            if parts[2] in GBP_BACKEND_KEYS:
+                cfg.gbp_backend = GBP_BACKEND_KEYS[parts[2]]
+            elif "=" in parts[2]:
+                apply_gbp_extra_field(cfg, parts[2], spec)
+            else:
+                cfg.region_policy = parts[2]
+        if len(parts) > 3 and parts[3]:
+            apply_gbp_extra_field(cfg, parts[3], spec)
+        if len(parts) > 4 and parts[4]:
+            apply_gbp_extra_field(cfg, parts[4], spec)
+        if len(parts) > 5 and parts[5]:
+            apply_gbp_extra_field(cfg, parts[5], spec)
+        if len(parts) > 6:
             raise ValueError(f"too many ':' fields in decoder spec {spec!r}")
+        backend_suffix = (
+            "" if cfg.gbp_backend == "dense_cpu" else f":{cfg.gbp_backend}"
+        )
+        states_suffix = (
+            ""
+            if cfg.gbp_max_states == (1 << 22)
+            else f":states={cfg.gbp_max_states}"
+        )
+        boost_suffix = (
+            ""
+            if cfg.gbp_oscillation_boost == 1.0
+            else f":boost={cfg.gbp_oscillation_boost:g}"
+        )
+        cap_suffix = (
+            ""
+            if cfg.gbp_oscillation_boost_cap == 64.0
+            else f":boost_cap={cfg.gbp_oscillation_boost_cap:g}"
+        )
         return DecoderSpec(
-            label=f"gbp-{cfg.region_policy}:{cfg.degree}",
+            label=(
+                f"gbp-{cfg.region_policy}:{cfg.degree}{backend_suffix}"
+                f"{states_suffix}{boost_suffix}{cap_suffix}"
+            ),
             backend="flashbp",
             config=cfg,
         )
@@ -257,7 +356,6 @@ def load_cached_shot(path: str | Path, shot_index: int = 0) -> tuple[dict, dict]
         "bp_pred_obs",
         "ml_pred_obs",
     ):
-        print(f"{key}, {data[key]}")
         if key in data and len(data[key]) > 0:
             shot[key] = data[key][shot_index].astype(np.uint8)
 

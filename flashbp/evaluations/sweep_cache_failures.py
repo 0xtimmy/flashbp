@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+
 from _common import parse_decoder_spec, p_token
 
 
@@ -46,6 +48,19 @@ def safe_label(text: str) -> str:
 
 def parse_csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def cached_case_count(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    try:
+        data = np.load(path, allow_pickle=False)
+        if "syndromes" not in data:
+            return 0
+        return int(data["syndromes"].shape[0])
+    except Exception as exc:
+        print(f"WARNING: could not inspect existing cache {path}: {exc}")
+        return None
 
 
 def parse_args():
@@ -93,6 +108,7 @@ def main():
     print(f"Output dir  : {output_dir}")
 
     failures = 0
+    skipped = 0
     job = 0
     for fail in fail_decoders:
         fail_label = parse_decoder_spec(fail).label
@@ -127,6 +143,19 @@ def main():
                 cmd.append("--force")
 
             print(f"\n[{job}/{total}] {fail_label} fails, {success_label} succeeds")
+            existing_count = cached_case_count(output)
+            if existing_count is not None and not args.force:
+                if existing_count >= args.target:
+                    skipped += 1
+                    print(
+                        f"Skipping existing complete cache: {output} "
+                        f"({existing_count}/{args.target} cases)"
+                    )
+                    continue
+                print(
+                    f"Resuming partial cache: {output} "
+                    f"({existing_count}/{args.target} cases)"
+                )
             print(" ".join(cmd))
             if args.dry_run:
                 continue
@@ -138,6 +167,8 @@ def main():
 
     if failures:
         raise SystemExit(f"{failures} cache sweep job(s) failed")
+    if skipped:
+        print(f"\nSkipped {skipped} complete cache file(s).")
 
 
 if __name__ == "__main__":

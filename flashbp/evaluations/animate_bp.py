@@ -58,9 +58,9 @@ def main():
     output_dir = Path(
         args.output_dir
         or (
-            f"results/recordings/bp/{cache_path.stem}_{args.shot_index}"
+            f"results/recordings/bp/{code_name}_{p_token(p)}.{cache_path.stem}_{args.shot_index}"
             if cache_path is not None
-            else f"results/recordings/bp/{code_name}_p{p_token(p)}"
+            else f"results/recordings/bp/{code_name}_{p_token(p)}.bp"
         )
     )
 
@@ -122,12 +122,16 @@ def main():
         cycle_dir = output_dir / "cycles"
         print(f"\nRendering cycles (length <= {args.cycle_max_dist}) "
               f"to {cycle_dir / 'frames'} ...")
-        cycle_video = animate_cycles(bp, cycle_dir,
-                                     max_dist=args.cycle_max_dist,
-                                     framerate=args.framerate,
-                                     layout=layout,
-                                     syndrome=syndrome)
-        print(f"Cycle video : {cycle_video}")
+        try:
+            cycle_video = animate_cycles(bp, cycle_dir,
+                                         max_dist=args.cycle_max_dist,
+                                         framerate=args.framerate,
+                                         layout=layout,
+                                         syndrome=syndrome)
+        except ValueError as exc:
+            print(f"WARNING: skipping cycle animation: {exc}")
+        else:
+            print(f"Cycle video : {cycle_video}")
 
 
 if __name__ == "__main__":

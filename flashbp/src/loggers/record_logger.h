@@ -18,6 +18,7 @@ struct IterationRecord {
     std::vector<uint8_t>      decision;
     std::vector<double>       msg_v2c;
     std::vector<double>       msg_c2v;
+    std::vector<int>          active_regions; // populated only by GBPLogger
     std::vector<CheckTensor>  tensors;   // empty unless using TensorLogger
 };
 
@@ -72,7 +73,7 @@ public:
     {
         if (record_state_->shots.empty()) return;
         record_state_->shots.back().iterations.push_back(
-            {iter, syndrome, decision, msg_v2c, msg_c2v, {}});
+            {iter, syndrome, decision, msg_v2c, msg_c2v, {}, {}});
     }
 
     const std::vector<ShotRecord>& shots() const { return record_state_->shots; }

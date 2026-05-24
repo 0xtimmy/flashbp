@@ -3,29 +3,15 @@
 #include "../flashbp_core.h"
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 
 namespace {
 
-inline double minsum_cost(int x, double l) {
-    return std::max(0.0, (x ? 1.0 : -1.0) * l);
-}
-
-inline int popcount32(uint32_t v) {
-#if defined(__GNUC__) || defined(__clang__)
-    return __builtin_popcount(v);
-#else
-    v = v - ((v >> 1) & 0x55555555u);
-    v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
-    return (int)((((v + (v >> 4)) & 0x0F0F0F0Fu) * 0x01010101u) >> 24);
-#endif
-}
-
-bool region_is_active(const GBPRegion& region,
-                      const std::vector<uint8_t>& syndrome) {
+bool gbp_region_is_active(const GBPRegion& region,
+                          const std::vector<uint8_t>& syndrome) {
     switch (region.activation) {
     case GBPRegionActivation::Always:
         return true;
@@ -42,21 +28,43 @@ bool region_is_active(const GBPRegion& region,
     return true;
 }
 
+std::vector<int> active_region_indices(const std::vector<GBPRegion>& regions,
+                                       const std::vector<uint8_t>& syndrome) {
+    std::vector<int> active;
+    for (int i = 0; i < (int)regions.size(); ++i) {
+        if (gbp_region_is_active(regions[i], syndrome))
+            active.push_back(i);
+    }
+    return active;
+}
+
 } // anonymous namespace
 
 template<typename LoggerT>
 GBPDecoder<LoggerT>::GBPDecoder(const FlashBPBase& bp,
                                 LoggerT logger,
                                 int degree,
-                                std::unique_ptr<RegionGroupingPolicy> policy)
+                                std::unique_ptr<RegionGroupingPolicy> policy,
+                                std::unique_ptr<GBPBackend> backend,
+                                double oscillation_boost,
+                                double oscillation_boost_cap)
     : num_detectors_(bp.num_detectors)
     , num_errors_(bp.num_errors)
     , degree_(degree)
+    , oscillation_boost_(oscillation_boost)
+    , oscillation_boost_cap_(oscillation_boost_cap)
     , policy_(std::move(policy))
+    , backend_(std::move(backend))
     , logger_(std::move(logger))
 {
     if (!policy_)
         throw std::invalid_argument("GBPDecoder: region grouping policy is null.");
+    if (!backend_)
+        throw std::invalid_argument("GBPDecoder: backend is null.");
+    if (oscillation_boost_ < 1.0)
+        throw std::invalid_argument("GBPDecoder: oscillation_boost must be >= 1.");
+    if (oscillation_boost_cap_ < 1.0)
+        throw std::invalid_argument("GBPDecoder: oscillation_boost_cap must be >= 1.");
 
     const auto& H = bp.H_raw();
     const auto& error_probs = bp.error_probs_raw();
@@ -84,6 +92,7 @@ GBPDecoder<LoggerT>::GBPDecoder(const FlashBPBase& bp,
     regions_ = policy_->build_regions(
         num_detectors_, num_errors_, edges_, var_edges_, check_edges_,
         edge_axis_pos_);
+    backend_->prepare(regions_, ch_llr_);
 
     int max_axes = 0;
     int max_internal = 0;
@@ -93,11 +102,26 @@ GBPDecoder<LoggerT>::GBPDecoder(const FlashBPBase& bp,
     }
 
     logger_("GBPDecoder constructed  policy=" + std::string(policy_->name()) +
+            "  backend=" + std::string(backend_->name()) +
             "  degree=" + std::to_string(degree_) +
             "  regions=" + std::to_string(regions_.size()) +
             "  edges=" + std::to_string(edges_.size()) +
             "  max_axes=" + std::to_string(max_axes) +
-            "  max_internal_checks=" + std::to_string(max_internal), 1);
+            "  max_internal_checks=" + std::to_string(max_internal) +
+            "  oscillation_boost=" + std::to_string(oscillation_boost_) +
+            "  oscillation_boost_cap=" + std::to_string(oscillation_boost_cap_),
+            1);
+
+    if constexpr (std::is_same_v<LoggerT, GBPLogger>) {
+        logger_.record_gbp_start(
+            policy_->name(),
+            backend_->name(),
+            degree_,
+            num_detectors_,
+            num_errors_,
+            (int)edges_.size(),
+            regions_);
+    }
 }
 
 template<typename LoggerT>
@@ -107,6 +131,7 @@ std::vector<uint8_t> GBPDecoder<LoggerT>::operator()(
 {
     if ((int)syndrome.size() != num_detectors_)
         throw std::invalid_argument("Syndrome length must equal num_detectors.");
+    reset_decode_stats();
 
     if constexpr (std::is_base_of_v<DecodeLogger<true>, LoggerT>) {
         logger_.set_shot(shot_counter_);
@@ -127,15 +152,8 @@ std::vector<uint8_t> GBPDecoder<LoggerT>::operator()(
         msg_v2c[i] = ch_llr_[edges_[i].var];
 
     std::vector<uint8_t> decision(num_errors_);
-
-    size_t max_states = 1;
-    for (const auto& region : regions_)
-        max_states = std::max(max_states, (size_t)1 << region.data.size());
-    std::vector<double> weight(max_states);
-    std::vector<uint8_t> bad(max_states);
-
-    constexpr double INF = std::numeric_limits<double>::infinity();
-    constexpr double SAT = 1e30;
+    std::unordered_map<std::string, int> seen_decisions;
+    double region_message_scale = 1.0;
 
     for (int iter = 0; iter < max_iter; ++iter) {
         if constexpr (std::is_base_of_v<DecodeLogger<true>, LoggerT>)
@@ -145,70 +163,12 @@ std::vector<uint8_t> GBPDecoder<LoggerT>::operator()(
         std::fill(next_c2v.begin(), next_c2v.end(), 0.0);
         std::fill(next_c2v_count.begin(), next_c2v_count.end(), 0);
 
-        for (const GBPRegion& region : regions_) {
-            if (!region_is_active(region, syndrome))
-                continue;
-            const int K = (int)region.data.size();
-            if (K == 0) continue;
-            const size_t N = (size_t)1 << K;
-
-            std::vector<double> incoming(K);
-            for (int k = 0; k < K; ++k) {
-                int ei = region.axis_edge[k];
-                incoming[k] = (ei >= 0) ? msg_v2c[ei] : ch_llr_[region.data[k]];
-            }
-
-            for (size_t idx = 0; idx < N; ++idx) {
-                double w = 0.0;
-                for (int k = 0; k < K; ++k) {
-                    int x = (int)((idx >> k) & 1);
-                    w += minsum_cost(x, incoming[k]);
-                }
-                weight[idx] = w;
-            }
-
-            for (size_t idx = 0; idx < N; ++idx) {
-                uint8_t violated = 0;
-                for (const auto& ic : region.internal_checks) {
-                    int s = syndrome[ic.check_idx] & 1;
-                    int sum = popcount32((uint32_t)(idx & ic.mask)) & 1;
-                    if ((sum ^ s) != 0) {
-                        violated = 1;
-                        break;
-                    }
-                }
-                bad[idx] = violated;
-            }
-
-            for (const auto& out : region.outputs) {
-                int ei = out.edge_idx;
-                int k = out.axis;
-                double l_v = msg_v2c[ei];
-
-                double W0 = INF;
-                double W1 = INF;
-                for (size_t idx = 0; idx < N; ++idx) {
-                    if (bad[idx]) continue;
-                    int x = (int)((idx >> k) & 1);
-                    double w_ext = weight[idx] - minsum_cost(x, l_v);
-                    if (x == 0) W0 = std::min(W0, w_ext);
-                    else        W1 = std::min(W1, w_ext);
-                }
-
-                double out_msg = 0.0;
-                if      (W0 == INF && W1 == INF) out_msg = 0.0;
-                else if (W0 == INF)              out_msg = -SAT;
-                else if (W1 == INF)              out_msg = +SAT;
-                else                             out_msg = W1 - W0;
-
-                next_c2v[ei] += out_msg;
-                next_c2v_count[ei] += 1;
-            }
-        }
+        backend_->update_regions(syndrome, msg_v2c, next_c2v, next_c2v_count);
 
         for (int ei = 0; ei < num_edges; ++ei)
             msg_c2v[ei] = next_c2v_count[ei]
-                         ? next_c2v[ei] / (double)next_c2v_count[ei]
+                         ? region_message_scale *
+                               (next_c2v[ei] / (double)next_c2v_count[ei])
                          : 0.0;
 
         for (int e = 0; e < num_errors_; ++e) {
@@ -219,8 +179,17 @@ std::vector<uint8_t> GBPDecoder<LoggerT>::operator()(
                 msg_v2c[i] = total - msg_c2v[i];
         }
 
-        if constexpr (std::is_base_of_v<RecordLogger, LoggerT>)
+        if constexpr (std::is_same_v<LoggerT, GBPLogger>) {
+            logger_.record_gbp_iteration(
+                iter,
+                syndrome,
+                decision,
+                msg_v2c,
+                msg_c2v,
+                active_region_indices(regions_, syndrome));
+        } else if constexpr (std::is_base_of_v<RecordLogger, LoggerT>) {
             logger_.record_iteration(iter, syndrome, decision, msg_v2c, msg_c2v);
+        }
 
         bool converged = true;
         for (int d = 0; d < num_detectors_ && converged; ++d) {
@@ -232,12 +201,37 @@ std::vector<uint8_t> GBPDecoder<LoggerT>::operator()(
 
         if (converged) {
             logger_("GBP converged at iter=" + std::to_string(iter), 3);
+            set_decode_stats(true, iter + 1);
             return decision;
+        }
+
+        if (oscillation_boost_ > 1.0) {
+            const std::string key(
+                reinterpret_cast<const char*>(decision.data()),
+                decision.size());
+            int& seen = seen_decisions[key];
+            if (seen > 0) {
+                const double old_scale = region_message_scale;
+                region_message_scale = std::min(
+                    oscillation_boost_cap_,
+                    region_message_scale * oscillation_boost_);
+                if (region_message_scale > old_scale) {
+                    logger_(
+                        "GBP oscillation detected  iter=" +
+                        std::to_string(iter) +
+                        "  repeat_count=" + std::to_string(seen) +
+                        "  region_message_scale=" +
+                        std::to_string(region_message_scale),
+                        2);
+                }
+            }
+            ++seen;
         }
     }
 
     logger_("GBP max_iter=" + std::to_string(max_iter) +
             " reached without convergence", 2);
+    set_decode_stats(false, max_iter);
     return decision;
 }
 
@@ -246,4 +240,5 @@ template class GBPDecoder<Logger<true>>;
 template class GBPDecoder<DecodeLogger<true>>;
 template class GBPDecoder<RecordLogger>;
 template class GBPDecoder<TensorLogger>;
+template class GBPDecoder<GBPLogger>;
 template class GBPDecoder<MLLogger>;

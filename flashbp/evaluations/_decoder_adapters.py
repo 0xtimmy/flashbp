@@ -1,5 +1,6 @@
 from _common import (  # noqa: F401
     BP_OSD_KEYS,
+    GBP_BACKEND_KEYS,
     GBP_POLICY_KEYS,
     DecoderSpec,
     LdpcBpOsdRunner,

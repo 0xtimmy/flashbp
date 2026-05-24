@@ -24,7 +24,7 @@ import flashbp
 from flashbp import DecoderConfig
 from flashbp.analytics import plot_active_check_cycles
 from flashbp.animation import animate_cycles
-from _common import CODES, layout_for_code
+from _common import CODES, layout_for_code, p_token
 
 
 def parse_args():
@@ -107,9 +107,9 @@ def main():
     output_dir = Path(
         args.output_dir
         or (
-            f"results/cycles/{code_name}_active"
+            f"results/cycles/{code_name}_{p_token(float(p))}.active"
             if cache_path is None
-            else f"results/cycles/{cache_path.stem}_{args.shot_index}"
+            else f"results/cycles/{code_name}_{p_token(float(p))}.{cache_path.stem}_{args.shot_index}"
         )
     )
     prepare_output_dir(output_dir, args.force)

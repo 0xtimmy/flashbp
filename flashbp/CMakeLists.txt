@@ -24,6 +24,7 @@ pybind11_add_module(_flashbp
     src/torch_backend.cpp
     src/decoders/simple_decoder.cpp
     src/decoders/tensor_decoder.cpp
+    src/decoders/gbp_backend.cpp
     src/decoders/gbp_region_policy.cpp
     src/decoders/gbp_decoder.cpp
     src/decoders/degree_decoder.cpp

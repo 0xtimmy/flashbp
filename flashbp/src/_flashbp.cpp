@@ -30,6 +30,8 @@ PYBIND11_MODULE(_flashbp, m) {
              py::arg("max_iter") = 100,
              "Run the selected decoder on a syndrome (uint8, length num_detectors).\n"
              "Returns hard-decision error vector (uint8, length num_errors).")
+        .def("last_decode_stats", &FlashBPBase::last_decode_stats,
+             "Return lightweight stats from the most recent decode call.")
         .def("flush", &FlashBPBase::flush,
              "Flush buffered log messages to their configured sinks.\n"
              "No-op when log=False or log_buffered=False.")
@@ -43,7 +45,9 @@ PYBIND11_MODULE(_flashbp, m) {
              "Return recorded per-iteration data as a list of shot dicts.\n"
              "Each dict has keys: batch, shot, iterations.\n"
              "Each iteration dict has: iteration, syndrome, decision, msg_v2c, msg_c2v.\n"
-             "Returns None unless log_type='record'.");
+             "GBP recordings also include a shot-level 'gbp' metadata dict and "
+             "per-iteration active_regions.\n"
+             "Returns None unless log_type records structured data.");
 
     // ── LibTorch backend introspection ──────────────────────────────────────
     m.def("torch_available", &flashbp::torch_backend::available,

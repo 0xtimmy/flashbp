@@ -1,6 +1,8 @@
 #include "gbp_region_policy.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <iostream>
 #include <functional>
 #include <set>
 #include <stdexcept>
@@ -182,11 +184,68 @@ private:
     std::vector<int> rank_;
 };
 
+void warn_region_too_wide(const std::string& context,
+                          int axes,
+                          const GBPRegionBudget& budget,
+                          uint64_t estimated_states) {
+    std::cerr << "WARNING: " << context << " produced region with "
+              << axes << " axes, estimated_states=" << estimated_states
+              << " > max_states=" << budget.max_states
+              << " or axes > max_axes=" << budget.max_axes << "; "
+              << "using a smaller region or skipping it." << std::endl;
+}
+
+int binary_rank(std::vector<uint32_t> rows) {
+    int rank = 0;
+    for (int bit = 31; bit >= 0; --bit) {
+        int pivot = -1;
+        for (int r = rank; r < (int)rows.size(); ++r) {
+            if ((rows[r] >> bit) & 1u) {
+                pivot = r;
+                break;
+            }
+        }
+        if (pivot < 0) continue;
+        std::swap(rows[rank], rows[pivot]);
+        for (int r = 0; r < (int)rows.size(); ++r) {
+            if (r != rank && ((rows[r] >> bit) & 1u))
+                rows[r] ^= rows[rank];
+        }
+        ++rank;
+    }
+    return rank;
+}
+
+uint64_t estimate_region_states(const GBPRegion& region,
+                                const GBPRegionBudget& budget) {
+    const int K = (int)region.data.size();
+    if (K >= 63) return UINT64_MAX;
+    if (!budget.use_valid_state_estimate)
+        return uint64_t{1} << K;
+
+    std::vector<uint32_t> masks;
+    masks.reserve(region.internal_checks.size());
+    for (const auto& ic : region.internal_checks)
+        if (ic.mask != 0) masks.push_back(ic.mask);
+    const int rank = binary_rank(std::move(masks));
+    const int free_axes = std::max(0, K - rank);
+    return free_axes >= 63 ? UINT64_MAX : (uint64_t{1} << free_axes);
+}
+
+bool region_exceeds_budget(const GBPRegion& region,
+                           const GBPRegionBudget& budget,
+                           uint64_t* estimated_states = nullptr) {
+    const uint64_t states = estimate_region_states(region, budget);
+    if (estimated_states) *estimated_states = states;
+    return (int)region.data.size() > budget.max_axes ||
+           states > budget.max_states;
+}
+
 } // anonymous namespace
 
-CheckNeighborhoodPolicy::CheckNeighborhoodPolicy(int degree, int max_axes)
+CheckNeighborhoodPolicy::CheckNeighborhoodPolicy(int degree, GBPRegionBudget budget)
     : degree_(degree)
-    , max_axes_(max_axes)
+    , budget_(budget)
 {
     if (degree < 1)
         throw std::invalid_argument("CheckNeighborhoodPolicy: degree must be >= 1.");
@@ -235,17 +294,28 @@ std::vector<GBPRegion> CheckNeighborhoodPolicy::build_regions(
         region.center_check = c;
         region.data.assign(data_in_region.begin(), data_in_region.end());
 
-        const int K = (int)region.data.size();
-        if (K > max_axes_) {
-            throw std::runtime_error(
-                "CheckNeighborhoodPolicy: check " + std::to_string(c) +
-                " produced region with " + std::to_string(K) +
-                " axes > max_axes=" + std::to_string(max_axes_) +
-                " at degree=" + std::to_string(degree_) + ".");
-        }
-
+        uint64_t estimated_states = 0;
         populate_region_checks_and_outputs(
             region, std::set<int>{c}, num_errors, edges, var_edges, check_edges);
+        if (region_exceeds_budget(region, budget_, &estimated_states)) {
+            warn_region_too_wide(
+                "CheckNeighborhoodPolicy check " + std::to_string(c) +
+                " at degree=" + std::to_string(degree_),
+                (int)region.data.size(),
+                budget_,
+                estimated_states);
+            region = make_single_check_region(
+                c, num_errors, edges, var_edges, check_edges);
+            if (region_exceeds_budget(region, budget_, &estimated_states)) {
+                warn_region_too_wide(
+                    "CheckNeighborhoodPolicy fallback check " + std::to_string(c),
+                    (int)region.data.size(),
+                    budget_,
+                    estimated_states);
+                regions[c] = GBPRegion{};
+                continue;
+            }
+        }
         for (const auto& out : region.outputs)
             edge_axis_pos[out.edge_idx] = out.axis;
 
@@ -256,12 +326,12 @@ std::vector<GBPRegion> CheckNeighborhoodPolicy::build_regions(
 }
 
 ShortCyclePolicy::ShortCyclePolicy(int max_length,
-                                   int max_axes,
+                                   GBPRegionBudget budget,
                                    GBPRegionActivation activation,
                                    bool union_overlaps,
                                    std::string name)
     : max_length_(max_length < 4 ? 8 : max_length)
-    , max_axes_(max_axes)
+    , budget_(budget)
     , activation_(activation)
     , union_overlaps_(union_overlaps)
     , name_(std::move(name))
@@ -301,6 +371,7 @@ std::vector<GBPRegion> ShortCyclePolicy::build_regions(
     }
 
     if (union_overlaps_ && !seeds.empty()) {
+        std::vector<CycleSeed> original_seeds = seeds;
         DisjointSet dsu((int)seeds.size());
         std::vector<int> owner_check(num_detectors, -1);
         std::vector<int> owner_data(num_errors, -1);
@@ -327,7 +398,32 @@ std::vector<GBPRegion> ShortCyclePolicy::build_regions(
         std::vector<CycleSeed> compact;
         for (int i = 0; i < (int)merged.size(); ++i)
             if (used[i]) compact.push_back(std::move(merged[i]));
-        seeds = std::move(compact);
+        bool oversized_union = false;
+        int max_union_axes = 0;
+        uint64_t max_union_states = 0;
+        for (const auto& seed : compact) {
+            GBPRegion candidate;
+            candidate.center_check = *seed.checks.begin();
+            candidate.cycle_checks.assign(seed.checks.begin(), seed.checks.end());
+            candidate.data.assign(seed.data.begin(), seed.data.end());
+            populate_region_checks_and_outputs(
+                candidate, seed.checks, num_errors, edges, var_edges, check_edges);
+            uint64_t estimated_states = 0;
+            max_union_axes = std::max(max_union_axes, (int)candidate.data.size());
+            if (region_exceeds_budget(candidate, budget_, &estimated_states))
+                oversized_union = true;
+            max_union_states = std::max(max_union_states, estimated_states);
+        }
+        if (oversized_union) {
+            warn_region_too_wide(
+                "ShortCyclePolicy union component; disabling union for this policy",
+                max_union_axes,
+                budget_,
+                max_union_states);
+            seeds = std::move(original_seeds);
+        } else {
+            seeds = std::move(compact);
+        }
     }
 
     for (const auto& seed : seeds) {
@@ -336,16 +432,20 @@ std::vector<GBPRegion> ShortCyclePolicy::build_regions(
         region.activation = activation_;
         region.cycle_checks.assign(seed.checks.begin(), seed.checks.end());
         region.data.assign(seed.data.begin(), seed.data.end());
-        if ((int)region.data.size() > max_axes_) {
-            throw std::runtime_error(
-                "ShortCyclePolicy: cycle region has " +
-                std::to_string(region.data.size()) +
-                " axes > max_axes=" + std::to_string(max_axes_) +
-                " at max_length=" + std::to_string(max_length_) + ".");
-        }
 
         populate_region_checks_and_outputs(
             region, seed.checks, num_errors, edges, var_edges, check_edges);
+        uint64_t estimated_states = 0;
+        if (region_exceeds_budget(region, budget_, &estimated_states)) {
+            warn_region_too_wide(
+                "ShortCyclePolicy cycle at max_length=" +
+                std::to_string(max_length_),
+                (int)region.data.size(),
+                budget_,
+                estimated_states);
+            continue;
+        }
+
         if (!region.outputs.empty())
             regions.push_back(std::move(region));
     }
@@ -357,11 +457,14 @@ std::vector<GBPRegion> ShortCyclePolicy::build_regions(
             continue;
         GBPRegion region = make_single_check_region(
             c, num_errors, edges, var_edges, check_edges);
-        if ((int)region.data.size() > max_axes_) {
-            throw std::runtime_error(
-                "ShortCyclePolicy: fallback check region " + std::to_string(c) +
-                " has " + std::to_string(region.data.size()) +
-                " axes > max_axes=" + std::to_string(max_axes_) + ".");
+        uint64_t estimated_states = 0;
+        if (region_exceeds_budget(region, budget_, &estimated_states)) {
+            warn_region_too_wide(
+                "ShortCyclePolicy fallback check region " + std::to_string(c),
+                (int)region.data.size(),
+                budget_,
+                estimated_states);
+            continue;
         }
         regions.push_back(std::move(region));
     }
@@ -376,35 +479,132 @@ std::vector<GBPRegion> ShortCyclePolicy::build_regions(
     return regions;
 }
 
+ManualGroupPolicy::ManualGroupPolicy(std::vector<GBPManualGroup> groups,
+                                     GBPRegionBudget budget,
+                                     bool add_single_check_regions)
+    : groups_(std::move(groups))
+    , budget_(budget)
+    , add_single_check_regions_(add_single_check_regions)
+{}
+
+std::vector<GBPRegion> ManualGroupPolicy::build_regions(
+    int num_detectors,
+    int num_errors,
+    const std::vector<TannerEdge>& edges,
+    const std::vector<std::vector<int>>& var_edges,
+    const std::vector<std::vector<int>>& check_edges,
+    std::vector<int>& edge_axis_pos
+) const {
+    edge_axis_pos.assign(edges.size(), -1);
+    std::vector<GBPRegion> regions;
+
+    for (int gi = 0; gi < (int)groups_.size(); ++gi) {
+        const auto& group = groups_[gi];
+        std::set<int> data;
+        std::set<int> checks;
+        for (int v : group.data) {
+            if (v < 0 || v >= num_errors)
+                throw std::invalid_argument(
+                    "ManualGroupPolicy data index out of range: " +
+                    std::to_string(v));
+            data.insert(v);
+        }
+        for (int c : group.checks) {
+            if (c < 0 || c >= num_detectors)
+                throw std::invalid_argument(
+                    "ManualGroupPolicy check index out of range: " +
+                    std::to_string(c));
+            checks.insert(c);
+        }
+        if (data.empty() || checks.empty())
+            throw std::invalid_argument(
+                "ManualGroupPolicy groups require non-empty data and checks.");
+
+        GBPRegion region;
+        region.center_check = group.center_check >= 0
+                              ? group.center_check
+                              : *checks.begin();
+        region.activation = group.activation;
+        region.data.assign(data.begin(), data.end());
+        region.cycle_checks.assign(checks.begin(), checks.end());
+        populate_region_checks_and_outputs(
+            region, checks, num_errors, edges, var_edges, check_edges);
+        uint64_t estimated_states = 0;
+        if (region_exceeds_budget(region, budget_, &estimated_states)) {
+            warn_region_too_wide(
+                "ManualGroupPolicy group " + std::to_string(gi),
+                (int)region.data.size(),
+                budget_,
+                estimated_states);
+            continue;
+        }
+        if (!region.outputs.empty())
+            regions.push_back(std::move(region));
+    }
+
+    if (add_single_check_regions_) {
+        for (int c = 0; c < num_detectors; ++c) {
+            GBPRegion region = make_single_check_region(
+                c, num_errors, edges, var_edges, check_edges);
+            uint64_t estimated_states = 0;
+            if (region_exceeds_budget(region, budget_, &estimated_states)) {
+                warn_region_too_wide(
+                    "ManualGroupPolicy fallback check region " +
+                    std::to_string(c),
+                    (int)region.data.size(),
+                    budget_,
+                    estimated_states);
+                continue;
+            }
+            regions.push_back(std::move(region));
+        }
+    }
+
+    for (int ri = 0; ri < (int)regions.size(); ++ri) {
+        for (const auto& out : regions[ri].outputs) {
+            if (edge_axis_pos[out.edge_idx] < 0)
+                edge_axis_pos[out.edge_idx] = out.axis;
+        }
+    }
+    return regions;
+}
+
 std::unique_ptr<RegionGroupingPolicy> make_region_grouping_policy(
     const std::string& policy,
     int degree,
-    int max_axes
+    GBPRegionBudget budget,
+    std::vector<GBPManualGroup> manual_groups,
+    bool manual_add_single_check_regions
 ) {
+    if (policy == "manual" || policy == "manual_groups" ||
+        policy == "fixed_groups") {
+        return std::make_unique<ManualGroupPolicy>(
+            std::move(manual_groups), budget, manual_add_single_check_regions);
+    }
     if (policy.empty() || policy == "check" || policy == "check_neighborhood")
-        return std::make_unique<CheckNeighborhoodPolicy>(degree, max_axes);
+        return std::make_unique<CheckNeighborhoodPolicy>(degree, budget);
     if (policy == "cycles" || policy == "short_cycles")
         return std::make_unique<ShortCyclePolicy>(
-            degree, max_axes, GBPRegionActivation::Always, false, "short_cycles");
+            degree, budget, GBPRegionActivation::Always, false, "short_cycles");
     if (policy == "cycles_any_active" ||
         policy == "short_cycles_any_active" ||
         policy == "cycles_any_on" ||
         policy == "short_cycles_any_on")
         return std::make_unique<ShortCyclePolicy>(
-            degree, max_axes, GBPRegionActivation::AnyCheckActive, false,
+            degree, budget, GBPRegionActivation::AnyCheckActive, false,
             "short_cycles_any_active");
     if (policy == "cycles_all_active" ||
         policy == "short_cycles_all_active" ||
         policy == "cycles_all_on" ||
         policy == "short_cycles_all_on")
         return std::make_unique<ShortCyclePolicy>(
-            degree, max_axes, GBPRegionActivation::AllChecksActive, false,
+            degree, budget, GBPRegionActivation::AllChecksActive, false,
             "short_cycles_all_active");
     if (policy == "union_cycles" ||
         policy == "short_cycles_union" ||
         policy == "union_short_cycles")
         return std::make_unique<ShortCyclePolicy>(
-            degree, max_axes, GBPRegionActivation::Always, true,
+            degree, budget, GBPRegionActivation::Always, true,
             "short_cycles_union");
     if (policy == "union_cycles_any_active" ||
         policy == "short_cycles_union_any_active" ||
@@ -412,7 +612,7 @@ std::unique_ptr<RegionGroupingPolicy> make_region_grouping_policy(
         policy == "union_cycles_any_on" ||
         policy == "short_cycles_union_any_on")
         return std::make_unique<ShortCyclePolicy>(
-            degree, max_axes, GBPRegionActivation::AnyCheckActive, true,
+            degree, budget, GBPRegionActivation::AnyCheckActive, true,
             "short_cycles_union_any_active");
     if (policy == "union_cycles_all_active" ||
         policy == "short_cycles_union_all_active" ||
@@ -420,12 +620,13 @@ std::unique_ptr<RegionGroupingPolicy> make_region_grouping_policy(
         policy == "union_cycles_all_on" ||
         policy == "short_cycles_union_all_on")
         return std::make_unique<ShortCyclePolicy>(
-            degree, max_axes, GBPRegionActivation::AllChecksActive, true,
+            degree, budget, GBPRegionActivation::AllChecksActive, true,
             "short_cycles_union_all_active");
 
     throw std::invalid_argument(
         "Unknown GBP region_policy: \"" + policy +
-        "\". Available: \"check_neighborhood\", \"short_cycles\", "
+        "\". Available: \"check_neighborhood\", \"manual_groups\", "
+        "\"short_cycles\", "
         "\"short_cycles_any_active\", \"short_cycles_all_active\", "
         "\"short_cycles_union\", \"short_cycles_union_any_active\", "
         "\"short_cycles_union_all_active\".");

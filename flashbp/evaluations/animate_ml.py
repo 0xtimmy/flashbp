@@ -78,9 +78,9 @@ def main():
     output_dir = Path(
         args.output_dir
         or (
-            f"results/recordings/ml/{cache_path.stem}_{args.shot_index}"
+            f"results/recordings/ml/{code_name}_{p_token(p)}.{cache_path.stem}_{args.shot_index}"
             if cache_path is not None
-            else f"results/recordings/ml/{code_name}_p{p_token(p)}_contraction"
+            else f"results/recordings/ml/{code_name}_{p_token(p)}.contraction"
         )
     )
     prepare_output_dir(output_dir, args.force)

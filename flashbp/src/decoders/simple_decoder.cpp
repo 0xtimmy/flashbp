@@ -45,6 +45,7 @@ std::vector<uint8_t> SimpleDecoder<LoggerT>::operator()(
 {
     if ((int)syndrome.size() != num_detectors_)
         throw std::invalid_argument("Syndrome length must equal num_detectors.");
+    reset_decode_stats();
 
     if constexpr (std::is_base_of_v<DecodeLogger<true>, LoggerT>) {
         logger_.set_shot(shot_counter_);
@@ -122,11 +123,13 @@ std::vector<uint8_t> SimpleDecoder<LoggerT>::operator()(
 
         if (converged) {
             logger_("converged at iter=" + std::to_string(iter), 3);
+            set_decode_stats(true, iter + 1);
             return decision;
         }
     }
 
     logger_("max_iter=" + std::to_string(max_iter) + " reached without convergence", 2);
+    set_decode_stats(false, max_iter);
     return decision;
 }
 
