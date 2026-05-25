@@ -372,15 +372,220 @@ def _total_complexity(groups: list[dict]) -> int:
     return int(sum(int(row.get("valid_state_count", 1)) for row in groups))
 
 
+def _total_log2_complexity(groups: list[dict]) -> int:
+    return int(sum(int(row.get("log2_valid_states", 0)) for row in groups))
+
+
+def _max_axes(groups: list[dict]) -> int:
+    return int(max([int(row.get("num_axes", 0)) for row in groups] or [0]))
+
+
+def _total_grouped_data(groups: list[dict]) -> int:
+    return int(sum(len(_as_int_list(row.get("data", []))) for row in groups))
+
+
+def _complexity_key(groups: list[dict], outcome: dict | None = None) -> tuple:
+    key = (
+        _total_log2_complexity(groups),
+        _max_axes(groups),
+        _total_grouped_data(groups),
+        len(groups),
+        _total_complexity(groups),
+    )
+    if outcome is not None:
+        key += (int(outcome.get("iterations", 10**9)),)
+    return key
+
+
+def _candidate_complexity_key(row: dict) -> tuple:
+    return (
+        int(row.get("log2_valid_states", 0)),
+        int(row.get("num_axes", 0)),
+        len(_as_int_list(row.get("data", []))),
+        int(row.get("valid_state_count", 1)),
+        int(row.get("candidate", 0)),
+    )
+
+
+def _group_signature(row: dict) -> tuple:
+    return (
+        int(row.get("candidate", -1)),
+        tuple(_as_int_list(row.get("data", []))),
+        tuple(_as_int_list(row.get("checks", []))),
+        row.get("activation", "always"),
+    )
+
+
+def _groups_signature(groups: list[dict]) -> tuple:
+    return tuple(_group_signature(row) for row in groups)
+
+
+def _copy_with_region(
+    row: dict,
+    H: np.ndarray,
+    *,
+    data: list[int],
+    checks: list[int],
+    action: str,
+) -> dict:
+    data = sorted(set(int(v) for v in data))
+    checks = sorted(set(int(c) for c in checks))
+    out = dict(row)
+    out["data"] = data
+    out["checks"] = checks
+    out.update(_region_complexity(H, data, checks))
+    actions = list(out.get("shrink_actions", []))
+    actions.append(action)
+    out["shrink_actions"] = actions
+    sources = list(out.get("sources", []))
+    if "shrunk" not in sources:
+        sources.append("shrunk")
+    out["sources"] = sources
+    out["parent_candidate"] = int(row.get("parent_candidate", row.get("candidate", -1)))
+    return out
+
+
+def _has_region_edge(H: np.ndarray, row: dict) -> bool:
+    data = _as_int_list(row.get("data", []))
+    checks = _as_int_list(row.get("checks", []))
+    if not data or not checks:
+        return False
+    return bool(np.asarray(H, dtype=np.uint8)[np.ix_(checks, data)].any())
+
+
+def _simplify_successful_groups(
+    selected: list[dict],
+    final_outcome: dict,
+    evaluate: Callable[[list[dict]], dict],
+    require_correct: bool,
+    H: np.ndarray | None,
+    history: list[dict],
+) -> tuple[list[dict], dict]:
+    seen: set[tuple] = set()
+    changed = True
+    while changed:
+        changed = False
+
+        while len(selected) > 1:
+            removal_trials = []
+            for idx, cand in enumerate(selected):
+                trial = selected[:idx] + selected[idx + 1:]
+                sig = _groups_signature(trial)
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                outcome = evaluate(trial)
+                if _success(outcome, require_correct):
+                    removal_trials.append((idx, cand, trial, outcome))
+            if not removal_trials:
+                break
+            idx, cand, trial, outcome = min(
+                removal_trials,
+                key=lambda t: _complexity_key(t[2], t[3]),
+            )
+            selected = trial
+            final_outcome = outcome
+            history.append({
+                "step": len(history),
+                "action": "prune",
+                "candidate": int(cand["candidate"]),
+                "outcome": outcome,
+                "total_valid_state_count": _total_complexity(trial),
+                "total_log2_valid_states": _total_log2_complexity(trial),
+                "max_axes": _max_axes(trial),
+            })
+            changed = True
+
+        if H is None:
+            continue
+        H = np.asarray(H, dtype=np.uint8)
+        shrink_trials = []
+        for idx, cand in enumerate(selected):
+            data = _as_int_list(cand.get("data", []))
+            checks = _as_int_list(cand.get("checks", []))
+            if len(data) > 1:
+                for v in data:
+                    new_data = [x for x in data if x != v]
+                    shrunk = _copy_with_region(
+                        cand,
+                        H,
+                        data=new_data,
+                        checks=checks,
+                        action=f"remove_data:{int(v)}",
+                    )
+                    if not shrunk["data"] or not shrunk["checks"]:
+                        continue
+                    if not _has_region_edge(H, shrunk):
+                        continue
+                    trial = selected[:idx] + [shrunk] + selected[idx + 1:]
+                    sig = _groups_signature(trial)
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    outcome = evaluate(trial)
+                    if _success(outcome, require_correct):
+                        shrink_trials.append((idx, cand, shrunk, trial, outcome, "shrink_data", v))
+            if len(checks) > 1:
+                for c in checks:
+                    new_checks = [x for x in checks if x != c]
+                    shrunk = _copy_with_region(
+                        cand,
+                        H,
+                        data=data,
+                        checks=new_checks,
+                        action=f"remove_check:{int(c)}",
+                    )
+                    if not shrunk["data"] or not shrunk["checks"]:
+                        continue
+                    if not _has_region_edge(H, shrunk):
+                        continue
+                    trial = selected[:idx] + [shrunk] + selected[idx + 1:]
+                    sig = _groups_signature(trial)
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    outcome = evaluate(trial)
+                    if _success(outcome, require_correct):
+                        shrink_trials.append((idx, cand, shrunk, trial, outcome, "shrink_check", c))
+        if shrink_trials:
+            idx, cand, shrunk, trial, outcome, action, removed = min(
+                shrink_trials,
+                key=lambda t: _complexity_key(t[3], t[4]),
+            )
+            selected = trial
+            final_outcome = outcome
+            history.append({
+                "step": len(history),
+                "action": action,
+                "candidate": int(cand["candidate"]),
+                "removed": int(removed),
+                "outcome": outcome,
+                "total_valid_state_count": _total_complexity(trial),
+                "total_log2_valid_states": _total_log2_complexity(trial),
+                "max_axes": _max_axes(trial),
+                "candidate_log2_valid_states": int(shrunk.get("log2_valid_states", 0)),
+                "candidate_num_axes": int(shrunk.get("num_axes", 0)),
+            })
+            changed = True
+
+    return selected, final_outcome
+
+
 def search_minimal_gbp_groups(
     candidates: list[dict],
     evaluate: Callable[[list[dict]], dict],
     *,
     max_selected: int = 6,
     require_correct: bool = True,
+    H=None,
 ) -> dict:
     """
-    Greedy-add/prune search for a small sufficient manual region set.
+    Greedy-add/prune search for a low-complexity manual region set.
+
+    Successful trials are ranked by summed log2 valid states, max region axes,
+    total grouped data nodes, and only then region count.  After the first
+    success, the search repeatedly removes whole regions and then individual
+    data/check nodes from surviving regions when the smaller set still works.
 
     `evaluate(groups)` should run the manual GBP decoder and return at least
     `converged`, `residual_weight`, and optionally `correct`/`iterations`.
@@ -404,12 +609,12 @@ def search_minimal_gbp_groups(
         success_nonoptimal = [row for row in individual if row["succeeds"]]
         failed = [row for row in individual if not row["succeeds"]]
         success_nonoptimal.sort(key=lambda row: (
-            int(candidates[row["candidate"]].get("valid_state_count", 1)),
+            _candidate_complexity_key(candidates[row["candidate"]]),
             row["candidate"],
         ))
         failed.sort(key=lambda row: (
             _outcome_score(row["outcome"], require_correct),
-            -int(candidates[row["candidate"]].get("valid_state_count", 1)),
+            tuple(-x for x in _candidate_complexity_key(candidates[row["candidate"]])),
         ), reverse=True)
         return {
             "selected": [],
@@ -422,6 +627,8 @@ def search_minimal_gbp_groups(
                 "candidate": -1,
                 "outcome": final_outcome,
                 "total_valid_state_count": 0,
+                "total_log2_valid_states": 0,
+                "max_axes": 0,
             }],
             "individual": individual,
             "success_nonoptimal": success_nonoptimal,
@@ -435,8 +642,7 @@ def search_minimal_gbp_groups(
             groups = selected + [cand]
             outcome = evaluate(groups)
             score = _outcome_score(outcome, require_correct)
-            total_complexity = _total_complexity(groups)
-            trials.append((cand, outcome, score, total_complexity))
+            trials.append((cand, outcome, score, groups))
             if best_seen is None or score > best_seen_score:
                 best_seen = groups
                 best_seen_score = score
@@ -447,19 +653,19 @@ def search_minimal_gbp_groups(
         if successful:
             chosen = min(
                 successful,
-                key=lambda t: (t[3], len(selected) + 1, int(t[1].get("iterations", 10**9))),
+                key=lambda t: _complexity_key(t[3], t[1]),
             )
         else:
             chosen = max(
                 trials,
                 key=lambda t: (
                     t[2],
-                    -int(t[0].get("valid_state_count", 1)),
+                    tuple(-x for x in _complexity_key(t[3], t[1])),
                     float(t[0].get("priority", 0.0)),
                 ),
             )
 
-        cand, outcome, score, total_complexity = chosen
+        cand, outcome, score, groups = chosen
         selected.append(cand)
         remaining = [row for row in remaining if row["candidate"] != cand["candidate"]]
         final_outcome = outcome
@@ -468,30 +674,22 @@ def search_minimal_gbp_groups(
             "action": "add",
             "candidate": int(cand["candidate"]),
             "outcome": outcome,
-            "total_valid_state_count": total_complexity,
+            "total_valid_state_count": _total_complexity(groups),
+            "total_log2_valid_states": _total_log2_complexity(groups),
+            "max_axes": _max_axes(groups),
         })
         if _success(outcome, require_correct):
             break
 
     if _success(final_outcome, require_correct):
-        changed = True
-        while changed and len(selected) > 1:
-            changed = False
-            for cand in list(selected):
-                trial = [row for row in selected if row["candidate"] != cand["candidate"]]
-                outcome = evaluate(trial)
-                if _success(outcome, require_correct):
-                    selected = trial
-                    final_outcome = outcome
-                    history.append({
-                        "step": len(history),
-                        "action": "prune",
-                        "candidate": int(cand["candidate"]),
-                        "outcome": outcome,
-                        "total_valid_state_count": _total_complexity(trial),
-                    })
-                    changed = True
-                    break
+        selected, final_outcome = _simplify_successful_groups(
+            selected,
+            final_outcome,
+            evaluate,
+            require_correct,
+            H,
+            history,
+        )
 
     selected_ids = {int(row["candidate"]) for row in selected}
     individual_by_id = {int(row["candidate"]): row for row in individual}
@@ -504,12 +702,12 @@ def search_minimal_gbp_groups(
         if not row["succeeds"] and int(row["candidate"]) not in selected_ids
     ]
     success_nonoptimal.sort(key=lambda row: (
-        int(candidates[row["candidate"]].get("valid_state_count", 1)),
+        _candidate_complexity_key(candidates[row["candidate"]]),
         row["candidate"],
     ))
     failed.sort(key=lambda row: (
         _outcome_score(row["outcome"], require_correct),
-        -int(candidates[row["candidate"]].get("valid_state_count", 1)),
+        tuple(-x for x in _candidate_complexity_key(candidates[row["candidate"]])),
     ), reverse=True)
 
     return {
@@ -606,11 +804,16 @@ def write_region_search_csvs(
             "step",
             "action",
             "candidate",
+            "removed",
             "converged",
             "correct",
             "residual_weight",
             "iterations",
             "total_valid_state_count",
+            "total_log2_valid_states",
+            "max_axes",
+            "candidate_log2_valid_states",
+            "candidate_num_axes",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -620,11 +823,16 @@ def write_region_search_csvs(
                 "step": row["step"],
                 "action": row["action"],
                 "candidate": row["candidate"],
+                "removed": row.get("removed", None),
                 "converged": outcome.get("converged", None),
                 "correct": outcome.get("correct", None),
                 "residual_weight": outcome.get("residual_weight", None),
                 "iterations": outcome.get("iterations", None),
                 "total_valid_state_count": row.get("total_valid_state_count", None),
+                "total_log2_valid_states": row.get("total_log2_valid_states", None),
+                "max_axes": row.get("max_axes", None),
+                "candidate_log2_valid_states": row.get("candidate_log2_valid_states", None),
+                "candidate_num_axes": row.get("candidate_num_axes", None),
             })
 
 

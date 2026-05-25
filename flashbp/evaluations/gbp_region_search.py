@@ -120,7 +120,15 @@ def make_manual_evaluator(
     cache: dict[tuple, dict] = {}
 
     def evaluate(candidate_groups: list[dict]) -> dict:
-        key = tuple(int(row["candidate"]) for row in candidate_groups)
+        key = tuple(
+            (
+                int(row.get("candidate", -1)),
+                tuple(int(v) for v in row.get("data", [])),
+                tuple(int(c) for c in row.get("checks", [])),
+                row.get("activation", "always"),
+            )
+            for row in candidate_groups
+        )
         if key in cache:
             return dict(cache[key])
         cfg = copy.deepcopy(template_cfg)
@@ -244,6 +252,7 @@ def main():
         evaluator,
         max_selected=args.max_selected,
         require_correct=not args.allow_logical_failure,
+        H=comparison_bp.H,
     )
 
     candidates_path = output_dir / "candidates.csv"

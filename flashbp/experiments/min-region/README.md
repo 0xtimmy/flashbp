@@ -66,3 +66,24 @@ The runner shows a tqdm progress bar when `tqdm` is installed. Use
 `progress.json` under the output directory every few seconds. You can override
 that path with `--progress-file` and control the write cadence with
 `--progress-write-every`.
+
+The shot-index plots are also refreshed during long runs. By default this
+happens every 64 completed shots; use `--plot-every K` to change the cadence or
+`--plot-every 0` to disable periodic plot writes. The final run still writes the
+complete plot set.
+
+## Search Trigger
+
+By default the expensive minimal-region search is only run when the optimal
+decoder is correct, the syndrome is nonzero, and at least one non-opt baseline
+decoder has a logical failure:
+
+```text
+--search-trigger baseline_failure_nonzero
+--trigger-mode logical
+```
+
+This avoids counting trivial zero-syndrome shots as "minimal region" successes.
+Use `--search-trigger opt_correct` to search every ML-correct shot, or
+`--search-trigger nonzero_syndrome` to search all nonzero syndromes where the
+optimal decoder succeeds.
