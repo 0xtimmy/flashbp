@@ -9,7 +9,7 @@
 !src/**
 !scripts/**
 !evaluations/**
-!example.py
+!experiments/**
 
 # Build/package configuration.
 !CMakeLists.txt
