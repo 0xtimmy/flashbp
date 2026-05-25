@@ -340,7 +340,7 @@ bool SurpriseMLDecoder::class_log_probs_split(
     if (comps.size() <= 1)
         return false;
 
-    logger_("SurpriseML decoding split components=" + std::to_string(comps.size()), 1);
+    logger_("SurpriseML decoding split components=" + std::to_string(comps.size()), 2);
     const int n_classes = 1 << num_observables_;
     constexpr double NEG_INF = -std::numeric_limits<double>::infinity();
     struct RuntimeComponent {

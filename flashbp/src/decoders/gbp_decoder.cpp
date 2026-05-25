@@ -110,7 +110,7 @@ GBPDecoder<LoggerT>::GBPDecoder(const FlashBPBase& bp,
             "  max_internal_checks=" + std::to_string(max_internal) +
             "  oscillation_boost=" + std::to_string(oscillation_boost_) +
             "  oscillation_boost_cap=" + std::to_string(oscillation_boost_cap_),
-            1);
+            2);
 
     if constexpr (std::is_same_v<LoggerT, GBPLogger>) {
         logger_.record_gbp_start(

@@ -42,6 +42,33 @@ The main artifacts are:
   success rate, selected-region size distributions, and detector-distance stats.
 - `progress.json`: periodically rewritten progress snapshot for long runs.
 
+## Offline Analysis
+
+After a run has completed, render additional diagnostic plots without sampling
+or decoding again:
+
+```powershell
+python experiments/min-region/analyze.py `
+  results/experiments/min-region/hbb_0p05.truth.1000
+```
+
+By default this writes an `analysis/` directory inside the run. The analyzer
+adds:
+
+- `complexity_vs_syndrome.png`: selected region complexity against syndrome
+  weight, with vacuous and unrepaired shots separated.
+- `complexity_vs_distance.png`: complexity against mean grouped-node distance
+  from active detections.
+- `region_count_vs_axes.png`: whether repairs use many small regions or one
+  large region.
+- `selected_candidate_sources.png`: candidate source appearances in the pool
+  versus selected repairs.
+- `selected_node_frequency.png`: Tanner graph heatmap of nodes that appear in
+  selected repairs.
+- `selected_data_cooccurrence.png`: data-node co-occurrence heatmap.
+- `repair_cases_smallest.csv` and `repair_cases_largest.csv`: compact tables
+  for manual inspection.
+
 ## Candidate Sources
 
 - `delta`: candidates from GBP policy-delta diagnostics.

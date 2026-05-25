@@ -139,7 +139,7 @@ DegreeDecoder<LoggerT>::DegreeDecoder(const FlashBPBase& bp,
 
     logger_("DegreeDecoder constructed  degree=" + std::to_string(degree_) +
             "  edges="    + std::to_string(edges_.size()) +
-            "  max_axes=" + std::to_string(max_K), 1);
+            "  max_axes=" + std::to_string(max_K), 2);
 }
 
 // ── operator() ────────────────────────────────────────────────────────────────
