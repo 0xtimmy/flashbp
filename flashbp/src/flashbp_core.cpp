@@ -482,32 +482,19 @@ py::object ml_shots_to_py(const std::vector<MLShotRecord>& shots) {
 } // anonymous
 
 template<typename LoggerT>
-py::object FlashBP<LoggerT>::get_recording() const { return py::none(); }
-
-template<>
-py::object FlashBP<RecordLogger>::get_recording() const {
-    return shots_to_py(logger_.shots());
-}
-
-template<>
-py::object FlashBP<TensorLogger>::get_recording() const {
-    return shots_to_py(logger_.shots());
-}
-
-template<>
-py::object FlashBP<GBPLogger>::get_recording() const {
-    return gbp_shots_to_py(
-        logger_.shots(), logger_.gbp_metadata(), logger_.has_gbp_metadata());
-}
-
-template<>
-py::object FlashBP<MLLogger>::get_recording() const {
-    return ml_shots_to_py(logger_.ml_shots());
-}
-
-template<>
-py::object FlashBP<SurpriseMLLogger>::get_recording() const {
-    return ml_shots_to_py(logger_.ml_shots());
+py::object FlashBP<LoggerT>::get_recording() const {
+    if constexpr (std::is_same_v<LoggerT, RecordLogger> ||
+                  std::is_same_v<LoggerT, TensorLogger>) {
+        return shots_to_py(logger_.shots());
+    } else if constexpr (std::is_same_v<LoggerT, GBPLogger>) {
+        return gbp_shots_to_py(
+            logger_.shots(), logger_.gbp_metadata(), logger_.has_gbp_metadata());
+    } else if constexpr (std::is_same_v<LoggerT, MLLogger> ||
+                         std::is_same_v<LoggerT, SurpriseMLLogger>) {
+        return ml_shots_to_py(logger_.ml_shots());
+    } else {
+        return py::none();
+    }
 }
 
 // ── Explicit instantiations ───────────────────────────────────────────────────
